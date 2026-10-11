@@ -24,9 +24,12 @@ const MIRROR_FAR = 0.95;                  // ... and at the back (hand level wit
 const HAND_NEAR = 0.36, HAND_FAR = 0.12;  // palm method: palm / video height, near & far
 const LM_Z_GAIN = 1.0;                    // palm method: trust in MediaPipe's per-joint z
 
-const TIP_RADIUS = 0.24, PALM_RADIUS = 0.5;
-const TOUCH_BOUNCE = 0.4;                 // restitution for fast hand hits
-const SQUISH_SPEED = 2.2;                 // slower than this, a fingertip dents instead of batting
+const TIP_RADIUS = 0.2, PALM_RADIUS = 0.42;
+const TOUCH_BOUNCE = 0.15;                // restitution for fast hand hits
+const TOUCH_STRENGTH = 0.6;               // share of the hand's speed passed to a stone
+const TOUCH_MAX_SPEED = 9;                // cap on how fast a hit can send a stone
+const HAND_STILL = 0.9;                   // hand speeds below this are tracking jitter, not motion
+const SQUISH_SPEED = 2.5;                 // slower than this, a fingertip dents instead of batting
 const MAX_DENT = 0.35;                    // fraction of radius a stone can be dented
 const TOUCH_GLOW_DIST = 0.8;              // stones glow when a fingertip is this close
 
@@ -34,9 +37,12 @@ const GRAVITY = 14;
 const FLOAT_DRAG = 0.8, PILE_DRAG = 0.25, ESCAPE_DRAG = 0.12;
 const RESTITUTION = 0.6, FLOOR_BOUNCE = 0.35, FLOOR_FRICTION = 2.5;
 const ESCAPE_SPEED = 10;                  // throws faster than this leave the room
-const THROW_BOOST = 1.35;
+const THROW_BOOST = 1.0;
 const FLICK_SPEED = 16;                   // fast hand + loosening grip = release now
-const MAX_THROW = 50;
+const MAX_THROW = 30;
+const SPIN = 0.25;                        // overall spin multiplier (throws, hits, collisions)
+const MAX_SPIN = 2.5;                     // rad/s cap
+const SPIN_DAMP = 1.2;                    // how quickly spin settles
 const MIN_SIZE = 0.35, MAX_SIZE = 3.2;    // two-hand stretch limits
 const DOF_RANGE = 4.5;                    // depth distance at which a stone is fully defocused
 const JELLY_K = 160, JELLY_C = 7;         // slime spring: stiffness / damping
@@ -330,10 +336,10 @@ function release(p) {
   v.z *= 0.6; // depth from palm size is noisy; don't let it dominate a throw
   if (v.length() > MAX_THROW) v.setLength(MAX_THROW);
   b.vel.copy(v);
-  b.angVel.set(-v.y, v.x, rand(-1, 1)).multiplyScalar(0.45 / b.sizeMul);
+  b.angVel.set(-v.y, v.x, rand(-1, 1)).multiplyScalar((0.12 * SPIN) / b.sizeMul);
   b.escaping = Math.hypot(v.x, v.y) > ESCAPE_SPEED || v.z < -ESCAPE_SPEED;
   // let go: the slime boings back
-  b.jv += Math.min(v.length() * 0.05, 1.5);
+  b.jv += Math.min(v.length() * 0.03, 0.8);
 }
 
 function updatePointer(p, dt, now) {
@@ -470,7 +476,12 @@ function placeCollider(c, sx, sy, z, dtS, continuous) {
   c.prev.copy(c.pos);
   screenToWorld(sx, sy, z, c.pos);
   if (!continuous) { c.prev.copy(c.pos); c.vel.set(0, 0, 0); }
-  else c.vel.subVectors(c.pos, c.prev).divideScalar(Math.max(dtS, 1 / 120));
+  else {
+    // smooth, then treat tiny motion as tracking jitter
+    tmpV.subVectors(c.pos, c.prev).divideScalar(Math.max(dtS, 1 / 120));
+    c.vel.lerp(tmpV, 0.5);
+    if (c.vel.length() < HAND_STILL) c.vel.set(0, 0, 0);
+  }
   c.fresh = true;
 }
 
@@ -520,7 +531,7 @@ function processHands(result, now) {
     // fall back gracefully: mirror needs a face, metric needs a pose
     p.method = depth.method in p.zByMethod ? depth.method : 'metric' in p.zByMethod ? 'metric' : 'palm';
     const zRaw = p.zByMethod[p.method];
-    p.handZ = continuous ? p.handZ + (zRaw - p.handZ) * 0.4 : zRaw;
+    p.handZ = continuous ? p.handZ + (zRaw - p.handZ) * 0.3 : zRaw;
     let lmZ;
     if (p.method === 'palm') {
       const { hw } = halfExtents(p.handZ);
@@ -577,9 +588,9 @@ let time = 0;
 const handIsTouching = (p) => p.visible && !p.held && !p.fist && p.pinchAmt < 0.45;
 
 function jellyKick(b, normal, speed) {
-  if (speed < 1.2) return;
+  if (speed < 2) return;
   b.jAxis.copy(normal);
-  b.jv -= Math.min(speed * 0.12, 2.2) / Math.sqrt(b.sizeMul);
+  b.jv -= Math.min(speed * 0.06, 1.0) / Math.sqrt(b.sizeMul);
 }
 
 function handTouches() {
@@ -618,14 +629,14 @@ function handTouches() {
         rv.subVectors(b.vel, c.vel);
         const vn = rv.dot(n);
         if (vn < 0) {
-          b.vel.addScaledVector(n, -(1 + TOUCH_BOUNCE) * vn);
+          b.vel.addScaledVector(n, -(1 + TOUCH_BOUNCE) * vn * TOUCH_STRENGTH);
+          if (b.vel.length() > TOUCH_MAX_SPEED) b.vel.setLength(TOUCH_MAX_SPEED);
           // a little friction drags the stone along with the finger, and spins it
           tang.copy(rv).addScaledVector(n, -vn);
-          b.vel.addScaledVector(tang, -0.25);
-          b.angVel.add(axis.crossVectors(n, tang).multiplyScalar(-0.6));
-          b.grabPop = Math.max(b.grabPop, clamp(-vn / 12, 0.15, 0.8));
+          b.vel.addScaledVector(tang, -0.1);
+          b.angVel.add(axis.crossVectors(n, tang).multiplyScalar(-0.6 * SPIN));
+          b.grabPop = Math.max(b.grabPop, clamp(-vn / 20, 0.05, 0.4));
           jellyKick(b, n, -vn);
-          if (Math.hypot(b.vel.x, b.vel.y) > ESCAPE_SPEED * 1.4) b.escaping = true;
           hideHintSoon();
         }
       }
@@ -663,9 +674,9 @@ function collideStones() {
         const fr = gravityOn ? 0.15 : 0;  // contact friction keeps stacks from sliding apart
         a.vel.addScaledVector(tang, (-fr * ia) / (ia + ib));
         b.vel.addScaledVector(tang, (fr * ib) / (ia + ib));
-        a.angVel.add(axis.crossVectors(n, tang).multiplyScalar(-0.3 * ia * a.mass));
-        b.angVel.add(axis.crossVectors(n, tang).multiplyScalar(0.3 * ib * b.mass));
-        if (vn < -1.5) { jellyKick(a, n, -vn); jellyKick(b, n, -vn); }
+        a.angVel.add(axis.crossVectors(n, tang).multiplyScalar(-0.3 * SPIN * ia * a.mass));
+        b.angVel.add(axis.crossVectors(n, tang).multiplyScalar(0.3 * SPIN * ib * b.mass));
+        if (vn < -2.5) { jellyKick(a, n, -vn); jellyKick(b, n, -vn); }
       }
     }
   }
@@ -752,7 +763,7 @@ function physics(dt) {
         const sp = b.vel.length();
         if (sp > 1) { b.jAxis.copy(b.vel).divideScalar(sp); b.jTarget = Math.min(sp * 0.012, 0.3); }
       }
-      b.angVel.lerp(axis.set(-b.vel.y, b.vel.x, 0).multiplyScalar(0.25 / b.sizeMul), 1 - Math.exp(-dt * 6));
+      b.angVel.lerp(axis.set(-b.vel.y, b.vel.x, 0).multiplyScalar((0.05 * SPIN) / b.sizeMul), 1 - Math.exp(-dt * 4));
     } else if (b.state === 'free') {
       if (gravityOn) {
         b.vel.y -= GRAVITY * dt;
@@ -777,9 +788,12 @@ function physics(dt) {
     if (b.state === 'gone') continue;
     // rolling on the tray
     if (b.onFloor && !isHeld(b)) {
-      b.angVel.lerp(axis.set(b.vel.z, 0, -b.vel.x).divideScalar(b.r), 1 - Math.exp(-dt * 8));
-      if (b.vel.lengthSq() < 0.01) b.vel.multiplyScalar(0.5); // settle
+      const rolling = b.vel.lengthSq() > 0.25;
+      b.angVel.lerp(rolling ? axis.set(b.vel.z, 0, -b.vel.x).multiplyScalar(0.5 / b.r) : axis.set(0, 0, 0), 1 - Math.exp(-dt * 4));
+      if (b.vel.lengthSq() < 0.04) b.vel.multiplyScalar(0.5); // settle
     }
+    if (!isHeld(b)) b.angVel.multiplyScalar(Math.exp(-dt * SPIN_DAMP));
+    if (b.angVel.length() > MAX_SPIN) b.angVel.setLength(MAX_SPIN);
     const w = b.angVel.length();
     if (w > 1e-5) b.mesh.rotateOnWorldAxis(axis.copy(b.angVel).divideScalar(w), w * dt);
 

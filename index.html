@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Glass Beads — Spatial Study 01</title>
+  <link rel="stylesheet" href="./style.css" />
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/",
+        "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs"
+      }
+    }
+  </script>
+</head>
+<body>
+  <video id="video" playsinline muted></video>
+  <canvas id="gl"></canvas>
+  <canvas id="overlay"></canvas>
+
+  <section id="intro" class="glass card">
+    <div class="eyebrow">Spatial Study 01</div>
+    <h1>Glass Beads</h1>
+    <p>Your camera becomes the room. A pile of glass sits in front of you. Push it around with an open hand, pinch or close your fist to pick a stone up, pull it apart with both hands to make it bigger, and let go mid-swing to throw it.</p>
+    <div class="actions">
+      <button id="start" class="primary">Enter with camera</button>
+      <button id="nocam" class="ghost">Use mouse</button>
+    </div>
+    <small>Hand tracking runs entirely on-device. No video leaves your browser.</small>
+  </section>
+
+  <div id="status" class="glass pill hidden"></div>
+  <div id="hint" class="glass pill hidden">Open hand to push &nbsp;·&nbsp; pinch or fist to grab &nbsp;·&nbsp; both hands to stretch &nbsp;·&nbsp; let go mid-swing to throw</div>
+
+  <nav id="toolbar" class="glass hidden">
+    <div class="seg">
+      <button data-mode="pile" class="on">Pile</button>
+      <button data-mode="float">Float</button>
+    </div>
+    <button id="reset" class="ghost">Reset</button>
+  </nav>
+
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>

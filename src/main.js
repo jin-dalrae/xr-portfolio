@@ -1,7 +1,10 @@
 import * as THREE from 'three';
 import { STONES, makeSmallStones, makeBackground, makeGlassMaterial, makeStoneGeometry, makeGlowTexture } from './glass.js';
 import { makeFloor, makeShadow, floorHeight, floorNormal } from './floor.js';
-import { createHandLandmarker, pinchRatio, palmSize, fingerCurl, HAND_EDGES, WRIST, THUMB_TIP, INDEX_TIP } from './hands.js';
+import {
+  createHandLandmarker, createFaceLandmarker, pinchRatio, palmSize, fingerCurl,
+  solveHandPosition, faceDistance, focalPx, HAND_EDGES, WRIST, THUMB_TIP, INDEX_TIP,
+} from './hands.js';
 
 // ---------- tuning ----------
 const PINCH_ON = 0.3, PINCH_OFF = 0.44;   // thumb–index ratio: grab / let go
@@ -9,11 +12,17 @@ const FIST_ON = 1.25, FIST_OFF = 1.45;    // finger curl: close / open
 const PICK_SLACK_PX = 36;                 // forgiveness around a stone's silhouette
 const Z_MIN = -7, Z_MAX = 3;              // depth of the room (camera sits at z = 10)
 
-// Hand depth comes from palm size (palm / video height). Tune to your reach;
-// open the page with #debug to see the live value next to your hand.
-const HAND_NEAR = 0.36;                   // palm ratio with your hand close to the camera
-const HAND_FAR = 0.12;                    // palm ratio at full arm's length
-const LM_Z_GAIN = 1.0;                    // how much per-finger depth (from MediaPipe) is trusted
+// Hand depth. Three methods, switchable live in the depth panel (press D):
+//   mirror: hand distance / face distance. The screen is a mirror; a hand at your face
+//           is at the back of the room, a hand reaching to the screen is at the front.
+//           Independent of the camera lens, since both distances scale with it.
+//   metric: hand distance in meters (3D hand pose fit), mapped onto a self-calibrating
+//           range of your reach.
+//   palm:   apparent palm size only (the original heuristic).
+const MIRROR_NEAR = 0.3;                  // hand/face distance ratio at the front of the room
+const MIRROR_FAR = 0.95;                  // ... and at the back (hand level with your face)
+const HAND_NEAR = 0.36, HAND_FAR = 0.12;  // palm method: palm / video height, near & far
+const LM_Z_GAIN = 1.0;                    // palm method: trust in MediaPipe's per-joint z
 
 const TIP_RADIUS = 0.24, PALM_RADIUS = 0.5;
 const TOUCH_BOUNCE = 0.4;                 // restitution for fast hand hits
@@ -403,6 +412,7 @@ canvas.addEventListener('wheel', (e) => {
 window.addEventListener('keydown', (e) => {
   if (e.key === 'r' || e.key === 'R') resetAll();
   if (e.key === 'g' || e.key === 'G') setMode(gravityOn ? 'float' : 'pile');
+  if (e.key === 'd' || e.key === 'D') togglePanel();
 });
 
 // ---------- hands ----------
@@ -415,11 +425,45 @@ function lmToScreen(l) {
   return [(((1 - l.x) - 0.5) / s.x + 0.5) * W, ((l.y - 0.5) / s.y + 0.5) * H];
 }
 
+// ---------- depth sensing ----------
+const depth = {
+  method: 'mirror',
+  hfov: 62,                 // assumed webcam horizontal FOV; only scales the cm readouts
+  faceDist: 0, faceSeen: -1e9,
+  lo: 0.22, hi: 0.55,       // self-calibrating reach (meters) for the metric method
+};
+let faceLandmarker = null;
+let lastFaceTime = -1, faceFrame = 0;
+
+// 0 = front of the room (near the screen), 1 = back
+const zFromT = (t) => THREE.MathUtils.lerp(Z_MAX - 0.3, Z_MIN + 0.5, clamp(t, 0, 1));
+const faceFresh = (now) => depth.faceDist > 0 && now - depth.faceSeen < 1500;
+
 // palm ratio -> world z, linear in apparent distance (1 / size)
-function handDepth(palmR) {
+function palmDepth(palmR) {
   const near = 1 / HAND_NEAR, far = 1 / HAND_FAR;
-  const t = clamp((1 / Math.max(palmR, 1e-3) - near) / (far - near), 0, 1);
-  return THREE.MathUtils.lerp(Z_MAX - 0.3, Z_MIN + 0.5, t);
+  return zFromT((1 / Math.max(palmR, 1e-3) - near) / (far - near));
+}
+
+function metersToZ(d, method) {
+  if (method === 'mirror') return zFromT((d / depth.faceDist - MIRROR_NEAR) / (MIRROR_FAR - MIRROR_NEAR));
+  return zFromT((d - depth.lo) / (depth.hi - depth.lo));
+}
+
+// Widen instantly to cover where the hand goes; tighten slowly so one glitch doesn't stick.
+function adaptReach(d) {
+  if (d < depth.lo) depth.lo = d; else depth.lo += (d - depth.lo) * 0.0004;
+  if (d > depth.hi) depth.hi = d; else depth.hi += (d - depth.hi) * 0.0004;
+  if (depth.hi - depth.lo < 0.12) { const m = (depth.hi + depth.lo) / 2; depth.lo = m - 0.06; depth.hi = m + 0.06; }
+}
+
+function processFace(result, now) {
+  const lm = result.faceLandmarks?.[0];
+  if (!lm) return;
+  const d = faceDistance(lm, video.videoWidth, video.videoHeight, focalPx(video.videoWidth, depth.hfov));
+  if (!(d > 0.1 && d < 3)) return;
+  depth.faceDist = faceFresh(now) ? depth.faceDist + (d - depth.faceDist) * 0.15 : d;
+  depth.faceSeen = now;
 }
 
 function placeCollider(c, sx, sy, z, dtS, continuous) {
@@ -460,13 +504,33 @@ function processHands(result, now) {
     p.landmarks = lm;
     p.wrist = wrists[i];
 
-    // depth of the hand in the room
+    // depth of the hand in the room: every method is computed (for the depth panel),
+    // the selected one drives the interaction
+    const world = result.worldLandmarks?.[i];
     p.palmR = palmSize(lm, vw, vh) / vh;
-    const zRaw = handDepth(p.palmR);
+    p.zByMethod = { palm: palmDepth(p.palmR) };
+    const pose = world && solveHandPosition(lm, world, vw, vh, focalPx(vw, depth.hfov));
+    if (pose) {
+      p.dist = continuous && p.dist ? p.dist + (pose.z - p.dist) * 0.45 : pose.z;
+      p.poseErr = Math.sqrt(pose.err);
+      adaptReach(p.dist);
+      p.zByMethod.metric = metersToZ(p.dist, 'metric');
+      if (faceFresh(now)) p.zByMethod.mirror = metersToZ(p.dist, 'mirror');
+    }
+    // fall back gracefully: mirror needs a face, metric needs a pose
+    p.method = depth.method in p.zByMethod ? depth.method : 'metric' in p.zByMethod ? 'metric' : 'palm';
+    const zRaw = p.zByMethod[p.method];
     p.handZ = continuous ? p.handZ + (zRaw - p.handZ) * 0.4 : zRaw;
-    const { hw } = halfExtents(p.handZ);
-    const zScale = (LM_Z_GAIN * 2 * hw) / shared.uVideoScale.value.x; // MediaPipe z is in image-width units
-    const lmZ = (id) => p.handZ - lm[id].z * zScale;
+    let lmZ;
+    if (p.method === 'palm') {
+      const { hw } = halfExtents(p.handZ);
+      const zScale = (LM_Z_GAIN * 2 * hw) / shared.uVideoScale.value.x; // MediaPipe z is in image-width units
+      lmZ = (id) => p.handZ - lm[id].z * zScale;
+    } else {
+      // each joint's own metric depth, smoothed with the hand
+      const shift = p.dist - pose.z;
+      lmZ = (id) => metersToZ(pose.z + shift + world[id].z * pose.sz, p.method);
+    }
 
     // pinch point
     p.thumb = lmToScreen(lm[THUMB_TIP]);
@@ -476,12 +540,12 @@ function processHands(result, now) {
     p.y += ((p.thumb[1] + p.index[1]) / 2 - p.y) * a;
     p.pinchZ = (lmZ(THUMB_TIP) + lmZ(INDEX_TIP)) / 2;
 
-    p.ratio = pinchRatio(lm, vw, vh);
+    p.ratio = pinchRatio(lm, vw, vh, world);
     if (!p.pinch && p.ratio < PINCH_ON) p.pinch = true;
     else if (p.pinch && p.ratio > PINCH_OFF) p.pinch = false;
     p.pinchAmt = clamp((0.85 - p.ratio) / (0.85 - PINCH_ON), 0, 1);
 
-    p.curl = fingerCurl(lm, vw, vh);
+    p.curl = fingerCurl(lm, vw, vh, world);
     if (!p.fist && p.curl < FIST_ON) p.fist = true;
     else if (p.fist && p.curl > FIST_OFF) p.fist = false;
     p.squeeze = clamp((FIST_ON + 0.05 - p.curl) / 0.35, 0, 1);
@@ -845,12 +909,53 @@ function drawOverlay() {
     }
     ctx.restore();
 
-    if (DEBUG) {
+    if (panelOpen) {
       ctx.fillStyle = 'rgba(255,255,255,0.9)';
       ctx.font = '12px ui-monospace, monospace';
-      ctx.fillText(`palm ${p.palmR.toFixed(3)}  z ${p.handZ.toFixed(2)}  pinch ${p.ratio.toFixed(2)}  curl ${p.curl.toFixed(2)}`, p.gx + 30, p.gy - 30);
+      const cm = p.dist ? `${(p.dist * 100).toFixed(0)}cm  ` : '';
+      ctx.fillText(`${p.method}  ${cm}z ${p.handZ.toFixed(2)}  pinch ${p.ratio.toFixed(2)}  curl ${p.curl.toFixed(2)}`, p.gx + 30, p.gy - 30);
     }
   }
+}
+
+// ---------- depth panel (D, or open with #debug) ----------
+const panel = document.getElementById('depthPanel');
+const statsEl = document.getElementById('depthStats');
+let panelOpen = DEBUG;
+panel.classList.toggle('hidden', !panelOpen);
+function togglePanel() { panelOpen = !panelOpen; panel.classList.toggle('hidden', !panelOpen); }
+
+function setDepthMethod(m) {
+  depth.method = m;
+  for (const b of panel.querySelectorAll('[data-method]')) b.classList.toggle('on', b.dataset.method === m);
+}
+for (const b of panel.querySelectorAll('[data-method]')) b.addEventListener('click', () => setDepthMethod(b.dataset.method));
+setDepthMethod(depth.method);
+const fovInput = document.getElementById('fov');
+fovInput.addEventListener('input', () => {
+  depth.hfov = +fovInput.value;
+  document.getElementById('fovVal').textContent = `${depth.hfov}°`;
+  depth.lo = 0.22; depth.hi = 0.55; // reach in meters changes with the lens; relearn it
+});
+
+let statsTimer = 0;
+function updateStats(now) {
+  if (!panelOpen || now - statsTimer < 100) return;
+  statsTimer = now;
+  const cm = (m) => `${(m * 100).toFixed(0)} cm`;
+  const lines = [];
+  lines.push(`face     ${faceFresh(now) ? cm(depth.faceDist) : faceLandmarker ? 'not seen' : 'loading…'}`);
+  lines.push(`reach    ${cm(depth.lo)} – ${cm(depth.hi)}  (learning)`);
+  handPtrs.forEach((p, k) => {
+    if (!p.visible || !p.zByMethod) { lines.push(`hand ${k + 1}   —`); return; }
+    const z = p.zByMethod;
+    const f = (v) => (v == null ? '  —  ' : v.toFixed(2).padStart(5));
+    lines.push(`hand ${k + 1}   ${p.dist ? cm(p.dist) : '—'}` + (faceFresh(now) && p.dist ? `  ·  ${(p.dist / depth.faceDist).toFixed(2)}× face` : ''));
+    lines.push(`  z  mirror ${f(z.mirror)}  metric ${f(z.metric)}  palm ${f(z.palm)}`);
+    lines.push(`  using ${p.method}${p.poseErr != null ? `  ·  fit ±${p.poseErr.toFixed(1)}px` : ''}`);
+  });
+  lines.push(`room z   front ${(Z_MAX - 0.3).toFixed(1)}  →  back ${(Z_MIN + 0.5).toFixed(1)}`);
+  statsEl.textContent = lines.join('\n');
 }
 
 // ---------- intro / camera / toolbar ----------
@@ -879,6 +984,8 @@ document.getElementById('start').addEventListener('click', async () => {
   enter();
   setStatus('Requesting camera…');
   const landmarkerPromise = createHandLandmarker().catch((e) => { console.error(e); return null; });
+  // the face is only a ruler for depth; it loads alongside and is optional
+  createFaceLandmarker().then((f) => { faceLandmarker = f; }).catch((e) => console.warn('face tracking unavailable', e));
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
@@ -913,6 +1020,8 @@ function frame(now) {
 
   if (landmarker && video.readyState >= 2 && video.currentTime !== lastVideoTime) {
     lastVideoTime = video.currentTime;
+    // face distance changes slowly: sample it every third frame
+    if (faceLandmarker && ++faceFrame % 3 === 0) processFace(faceLandmarker.detectForVideo(video, now), now);
     processHands(landmarker.detectForVideo(video, now), now);
     if (!everSawHand && handPtrs.some((p) => p.visible)) {
       everSawHand = true;
@@ -928,6 +1037,7 @@ function frame(now) {
   updateVisuals(dt);
   renderer.render(scene, camera);
   drawOverlay();
+  updateStats(now);
   requestAnimationFrame(frame);
 }
 
@@ -935,4 +1045,4 @@ resize();
 requestAnimationFrame(frame);
 
 // handy from the devtools console: __glass.beads, __glass.hands, __glass.reset()
-window.__glass = { beads, hands: handPtrs, reset: resetAll, setMode, worldToScreen, processHands, shared };
+window.__glass = { beads, hands: handPtrs, reset: resetAll, setMode, worldToScreen, processHands, processFace, shared, depth };

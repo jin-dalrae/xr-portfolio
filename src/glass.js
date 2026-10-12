@@ -1,21 +1,23 @@
 import * as THREE from 'three';
 import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 
-// Each stone: tone, shape, and how the glass behaves.
-// tintAmt = absorption, irid = thin-film rainbow on the rim, frost = sea-glass blur.
+// Each stone: tone, shape, and its glass.
+// tintAmt = absorption, irid = faint rainbow sheen on the rim, frost = milkiness.
+// texture: clear · frosted · fluted (ribs) · seeded (tiny air bubbles) · ribbon (cat's-eye band) · hammered (dimples)
+export const TEXTURES = ['clear', 'frosted', 'fluted', 'seeded', 'ribbon', 'hammered'];
 export const STONES = [
-  { name: 'Rose Quartz', tint: '#ffb3c7', kind: 'pebble', size: 0.78, tintAmt: 0.55, irid: 0.35, frost: 0.0 },
-  { name: 'Sea Glass',   tint: '#8fe3cf', kind: 'pebble', size: 0.70, tintAmt: 0.60, irid: 0.20, frost: 0.7 },
-  { name: 'Amber',       tint: '#ffa640', kind: 'bead',   size: 0.60, tintAmt: 0.80, irid: 0.15, frost: 0.0 },
-  { name: 'Lavender',    tint: '#b7a3ff', kind: 'egg',    size: 0.70, tintAmt: 0.55, irid: 0.50, frost: 0.0 },
-  { name: 'Cobalt',      tint: '#4f7dff', kind: 'bead',   size: 0.50, tintAmt: 0.85, irid: 0.20, frost: 0.0 },
-  { name: 'Clear',       tint: '#eef3ff', kind: 'bead',   size: 0.88, tintAmt: 0.08, irid: 0.90, frost: 0.0 },
-  { name: 'Citrine',     tint: '#ffe07a', kind: 'ring',   size: 0.72, tintAmt: 0.60, irid: 0.30, frost: 0.0 },
-  { name: 'Mint',        tint: '#b5ffb8', kind: 'pebble', size: 0.56, tintAmt: 0.50, irid: 0.40, frost: 0.0 },
-  { name: 'Coral',       tint: '#ff8b7b', kind: 'egg',    size: 0.56, tintAmt: 0.60, irid: 0.25, frost: 0.0 },
-  { name: 'Moonstone',   tint: '#dfe8ff', kind: 'pebble', size: 0.66, tintAmt: 0.25, irid: 1.00, frost: 0.9 },
-  { name: 'Plum',        tint: '#d77ee0', kind: 'ring',   size: 0.56, tintAmt: 0.65, irid: 0.40, frost: 0.0 },
-  { name: 'Ice',         tint: '#aee8ff', kind: 'bead',   size: 0.44, tintAmt: 0.40, irid: 0.60, frost: 0.0 },
+  { name: 'Rose Quartz', tint: '#ffb3c7', kind: 'pebble', size: 0.78, tintAmt: 0.55, irid: 0.3, frost: 0.55, texture: 'frosted' },
+  { name: 'Sea Glass',   tint: '#8fe3cf', kind: 'pebble', size: 0.70, tintAmt: 0.60, irid: 0.2, frost: 0.8,  texture: 'frosted' },
+  { name: 'Amber',       tint: '#ffa640', kind: 'bead',   size: 0.60, tintAmt: 0.80, irid: 0.1, frost: 0,    texture: 'seeded' },
+  { name: 'Lavender',    tint: '#b7a3ff', kind: 'egg',    size: 0.70, tintAmt: 0.55, irid: 0.4, frost: 0,    texture: 'fluted' },
+  { name: 'Cobalt',      tint: '#4f7dff', kind: 'bead',   size: 0.50, tintAmt: 0.85, irid: 0.2, frost: 0,    texture: 'clear' },
+  { name: 'Clear',       tint: '#eef3ff', kind: 'bead',   size: 0.88, tintAmt: 0.08, irid: 0.6, frost: 0,    texture: 'seeded' },
+  { name: 'Citrine',     tint: '#ffe07a', kind: 'ring',   size: 0.72, tintAmt: 0.60, irid: 0.3, frost: 0,    texture: 'clear' },
+  { name: 'Mint',        tint: '#b5ffb8', kind: 'pebble', size: 0.56, tintAmt: 0.50, irid: 0.3, frost: 0,    texture: 'hammered' },
+  { name: 'Coral',       tint: '#ff8b7b', kind: 'egg',    size: 0.56, tintAmt: 0.45, irid: 0.2, frost: 0,    texture: 'ribbon' },
+  { name: 'Moonstone',   tint: '#dfe8ff', kind: 'pebble', size: 0.66, tintAmt: 0.25, irid: 0.8, frost: 0.9,  texture: 'frosted' },
+  { name: 'Plum',        tint: '#d77ee0', kind: 'ring',   size: 0.56, tintAmt: 0.65, irid: 0.3, frost: 0,    texture: 'fluted' },
+  { name: 'Ice',         tint: '#aee8ff', kind: 'bead',   size: 0.44, tintAmt: 0.40, irid: 0.5, frost: 0,    texture: 'hammered' },
 ];
 
 // Shared by the background quad and every stone, so refraction samples exactly what's behind.
@@ -127,6 +129,7 @@ export function makeGlassMaterial(shared, stone) {
       uJAmt: { value: 0 },
       uDentDir: { value: new THREE.Vector3(0, 0, 1) },
       uDent: { value: 0 },
+      uTex: { value: Math.max(0, TEXTURES.indexOf(stone.texture || 'clear')) },
     },
     transparent: true,
     vertexShader: /* glsl */ `
@@ -134,6 +137,8 @@ export function makeGlassMaterial(shared, stone) {
       varying vec3 vV;
       varying vec3 vObj;
       varying float vWorldZ;
+      varying vec3 vObjN;
+      varying mat3 vNM;
       uniform vec3 uJAxis;     // jelly axis (object space)
       uniform float uJAmt;     // >0 stretch, <0 squash, volume-preserving
       uniform vec3 uDentDir;   // where a fingertip presses in (object space)
@@ -161,6 +166,8 @@ export function makeGlassMaterial(shared, stone) {
         vN = normalize(normalMatrix * nn);
         vV = -mv.xyz;
         vObj = position;
+        vObjN = nn;
+        vNM = normalMatrix;
         vWorldZ = (modelMatrix * vec4(p, 1.0)).z;
         gl_Position = projectionMatrix * mv;
       }
@@ -187,38 +194,64 @@ export function makeGlassMaterial(shared, stone) {
       varying vec3 vV;
       varying vec3 vObj;
       varying float vWorldZ;
+      varying vec3 vObjN;
+      varying mat3 vNM;
+      uniform float uTex;   // 0 clear, 1 frosted, 2 fluted, 3 seeded, 4 ribbon, 5 hammered
+
+      vec3 hash33(vec3 p) {
+        p = fract(p * vec3(0.1031, 0.1030, 0.0973));
+        p += dot(p, p.yxz + 33.33);
+        return fract((p.xxy + p.yxx) * p.zyx);
+      }
+      // nearest feature point: xyz = offset to it, w = distance (static, in the stone's own space)
+      vec4 cell(vec3 p) {
+        vec3 i = floor(p), f = fract(p);
+        vec4 best = vec4(0.0, 0.0, 0.0, 9.0);
+        for (int x = -1; x <= 1; x++) for (int y = -1; y <= 1; y++) for (int z = -1; z <= 1; z++) {
+          vec3 o = vec3(float(x), float(y), float(z));
+          vec3 q = o + hash33(i + o) - f;
+          float d = length(q);
+          if (d < best.w) best = vec4(q, d);
+        }
+        return best;
+      }
 
       void main() {
         vec3 n = normalize(vN);
         vec3 v = normalize(vV);
+        vec3 on = normalize(vObjN);
+        vec3 ov = normalize(transpose(vNM) * v);   // toward the camera, in the stone's own space
+
+        // surface relief, carved into the stone (moves only when the stone turns)
+        if (uTex > 1.5 && uTex < 2.5) {            // fluted: soft vertical ribs
+          float a = atan(vObj.z, vObj.x);
+          vec3 t = vec3(-sin(a), 0.0, cos(a));
+          n = normalize(n + vNM * (t * sin(a * 14.0) * 0.12));
+        } else if (uTex > 4.5) {                   // hammered: shallow dimples
+          vec4 c = cell(vObj * 2.0);
+          vec3 tilt = c.xyz - on * dot(c.xyz, on);
+          n = normalize(n + vNM * (tilt * 0.12));
+        }
+
         float ndv = clamp(dot(n, v), 0.0, 1.0);
         float rim = 1.0 - ndv;
         float fres = pow(rim, 3.0);
 
-        // Ball-lens refraction: offset grows toward the rim and overshoots the
-        // center, so the room appears flipped & magnified inside each stone.
+        // Transmission: clear glass that bends what's behind it gently (never enough to
+        // flip the image), with a touch of softness so the inside stays calm.
         vec2 suv = gl_FragCoord.xy / uResolution;
-        vec2 k = vec2(1.0 / uAspect, 1.0) * uLensR * uIor;
-        vec2 off = -n.xy * k;
-
-        vec3 refr;
-        refr.r = sceneBg(suv + off * 0.90).r;
-        refr.g = sceneBg(suv + off * 1.00).g;
-        refr.b = sceneBg(suv + off * 1.12).b;
-
-        // Frosted glass and depth-of-field share one blur.
-        float blur = max(uFrost, uDof * 1.3);
-        if (blur > 0.01) {
-          vec3 acc = vec3(0.0);
-          float rad = blur * uLensR * 0.4;
-          for (int i = 0; i < 8; i++) {
-            float a = float(i) * 0.785398 + vObj.x * 3.0;
-            float rr = rad * (0.5 + 0.5 * fract(float(i) * 0.618));
-            acc += sceneBg(suv + off + vec2(cos(a), sin(a)) * rr * vec2(1.0 / uAspect, 1.0));
-          }
-          refr = mix(refr, acc / 8.0, clamp(blur, 0.0, 1.0));
-          refr += 0.04 * uFrost;            // milky scattering
+        vec2 aspect = vec2(1.0 / uAspect, 1.0);
+        vec2 off = -n.xy * aspect * uLensR * 0.75;   // magnifies a little, never flips
+        float blur = 0.12 + uFrost + uDof * 1.2;
+        float rad = uLensR * 0.6 * blur;
+        vec3 refr = vec3(0.0);
+        for (int i = 0; i < 12; i++) {
+          float a = float(i) * 2.39996;
+          float rr = rad * sqrt((float(i) + 0.5) / 12.0);
+          refr += sceneBg(suv + off + vec2(cos(a), sin(a)) * rr * aspect);
         }
+        refr /= 12.0;
+        refr = mix(refr, vec3(dot(refr, vec3(0.333))), 0.2 * uFrost) + 0.05 * uFrost;  // milky
 
         vec3 tint = uTint;
         float room = uHasVideo;  // 1 = match the real room, 0 = studio look
@@ -231,6 +264,27 @@ export function makeGlassMaterial(shared, stone) {
         vec3 trans = pow(max(tint, vec3(0.02)), vec3(uTintAmt * 1.5 * thick));
         vec3 body = refr * trans;
         body += tint * 0.04 * ndv * (1.0 - room);
+        vec3 lit = mix(vec3(1.0), ambTint * clamp(ambLum * 3.0, 0.45, 1.2), room);
+
+        if (uTex > 2.5 && uTex < 3.5) {
+          // seeded: tiny air bubbles suspended at two depths inside the glass
+          for (int L = 0; L < 2; L++) {
+            vec3 p = (vObj - ov * (0.22 + 0.3 * float(L))) * 6.0 + float(L) * 17.0;
+            vec4 c = cell(p);
+            float r0 = 0.06 + 0.07 * hash33(floor(p) + 3.0).x;
+            float ring = smoothstep(r0 * 0.55, r0 * 0.95, c.w) * (1.0 - smoothstep(r0 * 0.95, r0 * 1.1, c.w));
+            float inside = 1.0 - smoothstep(r0 * 0.8, r0, c.w);
+            body += lit * (ring * 0.22 + inside * 0.03) * (1.0 - 0.4 * float(L));
+          }
+        } else if (uTex > 3.5 && uTex < 4.5) {
+          // ribbon: a cat's-eye band of color through the middle, seen just inside the surface
+          vec3 p = vObj - ov * 0.4;
+          float sb = p.y + 0.22 * sin(p.x * 2.2 + p.z * 1.4);
+          float band = 1.0 - smoothstep(0.07, 0.17, abs(sb));
+          float core = 1.0 - smoothstep(0.0, 0.06, abs(sb));
+          vec3 ribbon = tint * lit * mix(0.55, 0.9, core) + lit * core * 0.12;
+          body = mix(body, ribbon, band * 0.8);
+        }
 
         // Caustic: light focused through the stone pools on the side away from the light.
         vec3 causticDir = normalize(mix(vec3(-0.25, -0.75, 0.6), vec3(-uKeyDir.xy, 0.6), room));
@@ -242,8 +296,8 @@ export function makeGlassMaterial(shared, stone) {
         body *= 1.0 - 0.3 * band;
 
         // Thin-film iridescence on the rim.
-        vec3 irid = 0.5 + 0.5 * cos(6.28318 * (vec3(0.0, 0.33, 0.67) + fres * 1.4 + uIridShift + vObj.y * 0.2));
-        vec3 rimCol = mix(vec3(1.0), irid, uIrid) * mix(vec3(1.0), tint, 0.3);
+        vec3 irid = 0.5 + 0.5 * cos(6.28318 * (vec3(0.0, 0.33, 0.67) + fres * 1.2 + uIridShift));
+        vec3 rimCol = mix(vec3(1.0), irid, uIrid * 0.45) * mix(vec3(1.0), tint, 0.3);
         rimCol *= mix(vec3(1.0), ambTint * clamp(ambLum * 3.0, 0.45, 1.1), room);
 
         // Studio lighting in view space: softbox overhead + two sharp highlights.
@@ -271,9 +325,6 @@ export function makeGlassMaterial(shared, stone) {
 
         col = mix(col, sceneBg(suv) * mix(0.7, 0.95, room) + tint * 0.03, uHaze * mix(1.0, 0.5, room));
 
-        // match the webcam's sensor noise
-        float grain = fract(sin(dot(gl_FragCoord.xy + fract(uTime * 7.13) * 91.7, vec2(12.9898, 78.233))) * 43758.5453) - 0.5;
-        col += grain * uGrain * (0.4 + ambLum);
 
         float alpha = 1.0 - uDof * smoothstep(0.5, 1.0, rim);  // soft, defocused silhouette
 
@@ -310,10 +361,10 @@ export function makeSmallStones(count, seed = 7) {
       name: base.name + ' chip',
       kind: rnd() < 0.55 ? 'bead' : rnd() < 0.8 ? 'pebble' : 'egg',
       size: 0.26 + rnd() * 0.17,
-      frost: rnd() < 0.2 ? 0.7 : base.frost,
+      texture: TEXTURES[Math.floor(rnd() * TEXTURES.length)],
       small: true,
     };
-  });
+  }).map((st) => ({ ...st, frost: st.texture === 'frosted' ? 0.75 : 0 }));
 }
 
 // Returns a unit-ish geometry; caller scales by stone.size.

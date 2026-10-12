@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { STONES, makeSmallStones, makeBackground, makeGlassMaterial, makeStoneGeometry, makeGlowTexture } from './glass.js';
-import { makeFloor, makeShadow, floorHeight, floorNormal } from './floor.js';
+import { makeFloor, makeShadow, trayProbe, trayPlane, trayRim, rayTray, trayAt, TRAY_RADIUS, RIM_TUBE } from './floor.js';
 import { createRoomProbe, createHandMask } from './room.js';
 import {
   createHandLandmarker, createFaceLandmarker, pinchRatio, palmSize, fingerCurl,
@@ -24,29 +24,37 @@ const MIRROR_NEAR = 0.3;                  // hand/face distance ratio at the fro
 const MIRROR_FAR = 0.95;                  // ... and at the back (hand level with your face)
 const HAND_NEAR = 0.36, HAND_FAR = 0.12;  // palm method: palm / video height, near & far
 const LM_Z_GAIN = 1.0;                    // palm method: trust in MediaPipe's per-joint z
+// Screen height as depth: over the tilted tray (lower half of the screen), where the
+// hand sits on screen says where it is on the tray, like a table seen in perspective.
+// Lower = nearer, higher = farther back. Blended with the measured depth.
+const TRAY_DEPTH = 0.65;                  // max share of hand depth taken from screen height
+const PILE_LIFT = 0.7;                    // hover this far above the tray surface (toward camera)
 
 const TIP_RADIUS = 0.2, PALM_RADIUS = 0.42;
 const TOUCH_BOUNCE = 0.15;                // restitution for fast hand hits
-const TOUCH_STRENGTH = 0.6;               // share of the hand's speed passed to a stone
-const TOUCH_MAX_SPEED = 9;                // cap on how fast a hit can send a stone
+const TOUCH_STRENGTH = 0.45;              // share of the hand's speed passed to a stone
+const TOUCH_MAX_SPEED = 7;                // cap on how fast a hit can send a stone
 const HAND_STILL = 0.9;                   // hand speeds below this are tracking jitter, not motion
 const SQUISH_SPEED = 2.5;                 // slower than this, a fingertip dents instead of batting
 const MAX_DENT = 0.35;                    // fraction of radius a stone can be dented
 const TOUCH_GLOW_DIST = 0.8;              // stones glow when a fingertip is this close
 
-const GRAVITY = 14;
-const FLOAT_DRAG = 0.8, PILE_DRAG = 0.25, ESCAPE_DRAG = 0.12;
-const RESTITUTION = 0.6, FLOOR_BOUNCE = 0.35, FLOOR_FRICTION = 2.5;
-const ESCAPE_SPEED = 10;                  // throws faster than this leave the room
-const THROW_BOOST = 1.0;
+const GRAVITY = 22;                       // heavy glass: falls and settles fast
+const FLOAT_DRAG = 0.8, PILE_DRAG = 0.25;
+const TABLE_Y = -3.6;                     // invisible table under the bowl (pile mode)
+const PILE_FRONT_Z = 1.0;                 // keeps stones on the table in view
+const RESTITUTION = 0.35, FLOOR_BOUNCE = 0.15;
+const TRAY_GRIP = 0.9;                    // friction in the bowl: stones settle, then stay where they settle
+const THROW_BOOST = 0.85;                 // heavy stones leave the hand a little slower
 const FLICK_SPEED = 16;                   // fast hand + loosening grip = release now
 const MAX_THROW = 30;
 const SPIN = 0.25;                        // overall spin multiplier (throws, hits, collisions)
 const MAX_SPIN = 2.5;                     // rad/s cap
 const SPIN_DAMP = 1.2;                    // how quickly spin settles
+const HOLD_FOLLOW = 13;                   // how tightly a held stone follows the hand (lower = heavier lag)
 const MIN_SIZE = 0.35, MAX_SIZE = 3.2;    // two-hand stretch limits
 const DOF_RANGE = 4.5;                    // depth distance at which a stone is fully defocused
-const JELLY_K = 160, JELLY_C = 7;         // slime spring: stiffness / damping
+const JELLY_K = 120, JELLY_C = 9;         // slime spring: stiffness / damping (heavier = slower, calmer)
 
 // ---------- DOM ----------
 const canvas = document.getElementById('gl');
@@ -98,7 +106,10 @@ const handMask = createHandMask();
 shared.uHandMask.value = handMask.tex;
 shared.uEnv.value = room.envTex;
 scene.add(makeBackground(shared));
-const floor = makeFloor();
+const floor = makeFloor(makeGlassMaterial(shared, {
+  tint: '#eef4ff', tintAmt: 0.06, irid: 0.3, frost: 0, texture: 'clear',
+}));
+floor.userData.rim.material.uniforms.uLensR.value = 0.02;
 scene.add(floor);
 
 let W = 1, H = 1;
@@ -152,7 +163,7 @@ function setMode(mode) {
 }
 
 // ---------- stones ----------
-const ALL_STONES = [...STONES, ...makeSmallStones(22)];
+const ALL_STONES = [...STONES, ...makeSmallStones(14)];
 
 const beads = ALL_STONES.map((stone, i) => {
   const geo = makeStoneGeometry(stone.kind, i + 1, stone.small ? 14 : 24);
@@ -173,11 +184,10 @@ const beads = ALL_STONES.map((stone, i) => {
     angVel: new THREE.Vector3(rand(-0.3, 0.3), rand(-0.3, 0.3), rand(-0.2, 0.2)),
     idleSpin: new THREE.Vector3(rand(-0.15, 0.15), rand(-0.25, 0.25), rand(-0.1, 0.1)),
     seed: Math.random() * 100,
-    state: 'gone', goneTimer: 0.2 + i * 0.05,
+    state: 'free',
     spawnT: 1, spawnFrom: 0, spawnTo: 0,
     holders: [], stretch0: 0, size0: 1,
-    hover: 0, near: 0, grabPop: 0, onFloor: false,
-    escaping: false,
+    hover: 0, near: 0, grabPop: 0, onFloor: false, floorN: new THREE.Vector3(0, 1, 0),
     // slime state
     jx: 0, jv: 0, jTarget: 0, jAxis: new THREE.Vector3(0, 1, 0),
     dent: 0, dv: 0, dentTarget: 0, dentDir: new THREE.Vector3(0, 0, 1),
@@ -185,47 +195,56 @@ const beads = ALL_STONES.map((stone, i) => {
 });
 const isHeld = (b) => b.holders.length > 0;
 
+// Where each stone is poured from: a sunflower spiral over the bowl, big stones in the
+// middle and chips toward the rim, relaxed so neighbors just touch.
+(function layoutPlatter() {
+  const order = [...beads].sort((a, b) => b.baseR - a.baseR);
+  const usable = (TRAY_RADIUS - RIM_TUBE * 2) * 0.85;
+  const pts = order.map((b, i) => {
+    const r = usable * 0.92 * Math.sqrt((i + 0.5) / order.length), a = i * 2.39996;
+    return { b, x: Math.cos(a) * r, z: Math.sin(a) * r };
+  });
+  for (let it = 0; it < 80; it++) {
+    for (let i = 0; i < pts.length; i++) for (let j = i + 1; j < pts.length; j++) {
+      const A = pts[i], B = pts[j];
+      const dx = B.x - A.x, dz = B.z - A.z, d = Math.hypot(dx, dz) || 1e-4;
+      const min = (A.b.baseR + B.b.baseR) * 0.98;
+      if (d < min) { const k = (min - d) / d / 2; A.x -= dx * k; A.z -= dz * k; B.x += dx * k; B.z += dz * k; }
+    }
+    for (const P of pts) {
+      const d = Math.hypot(P.x, P.z), max = usable - P.b.baseR;
+      if (d > max) { P.x *= max / d; P.z *= max / d; }
+    }
+  }
+  pts.forEach((P, i) => { P.b.home = { x: P.x, z: P.z }; P.b.homeOrder = i; });
+})();
+
 function setSize(b, mul) {
   b.sizeMul = mul;
   b.r = b.baseR * mul;
   b.mass = b.r ** 3;
 }
 
-function spawn(b) {
-  b.vel.set(0, 0, 0);
-  b.escaping = false;
-  b.spawnT = 0;
+// Stones are never generated or removed: they're poured into the bowl and then only
+// ever moved by physics and hands.
+function pour(b, k) {
+  b.vel.set(rand(-0.3, 0.3), 0, rand(-0.3, 0.3));
   b.jx = b.jv = b.dent = b.dv = 0;
   b.mesh.visible = true;
-  if (gravityOn) {
-    // drop in from above, toward the middle of the tray
-    const z = rand(-3, 1.2);
-    const { hw, hh } = halfExtents(z);
-    b.pos.set(rand(-hw, hw) * 0.45, hh + b.r + rand(0, 1.5), z);
-    b.state = 'free';
-    return;
-  }
-  // float: emerge from the depth into the least crowded spot
-  let best = null, bestScore = -Infinity;
-  for (let k = 0; k < 16; k++) {
-    const z = rand(-5, 1.5);
-    const { hw, hh } = halfExtents(z);
-    const c = new THREE.Vector3(rand(-hw + b.r, hw - b.r) * 0.85, rand(-hh + b.r, hh - b.r) * 0.8, z);
-    let score = Infinity;
-    for (const o of beads) if (o !== b && o.state !== 'gone') score = Math.min(score, c.distanceTo(o.pos) - o.r - b.r);
-    if (score > bestScore) { bestScore = score; best = c; }
-  }
-  b.pos.set(best.x, best.y, best.z - 7);
-  b.spawnFrom = best.z - 7; b.spawnTo = best.z;
-  b.state = 'spawning';
+  b.state = 'free';
+  b.spawnT = 1;
+  // from just above its own spot (spots don't overlap), in three staggered layers;
+  // they drop into the bowl, roll to the bottom and stack
+  trayAt(b.home.x, b.home.z, b.pos).y += b.r + 0.15 + (k % 3) * 0.35;
 }
 
 function resetAll() {
   for (const p of pointers) p.held = null;
-  beads.forEach((b, i) => {
+  if (!gravityOn) setMode('pile');
+  beads.forEach((b) => {
     b.holders.length = 0;
     setSize(b, 1);
-    b.state = 'gone'; b.mesh.visible = false; b.goneTimer = i * 0.04;
+    pour(b, b.homeOrder);
   });
 }
 
@@ -309,7 +328,7 @@ function grab(p, b, mode) {
   p.held = b;
   p.gripMode = mode;
   p.grabZ = b.pos.z; p.depthSm = b.pos.z; p.wheelZ = 0;
-  p.zOffset = p.gz == null ? 0 : b.pos.z - p.gz;   // stone eases from its depth to your hand's
+  p.zOffset = p.gz == null ? 0 : b.pos.z - p.gz;   // the stone keeps its own depth; only hand motion moves it
   p.history.length = 0;
   screenToWorld(p.gx, p.gy, b.pos.z, p.raw);
   p.target.copy(p.raw);
@@ -322,7 +341,6 @@ function grab(p, b, mode) {
   } else {
     b.holders = [p];
   }
-  b.escaping = false;
   b.grabPop = 1;
   b.state = 'free';
   b.spawnT = Math.max(b.spawnT, 0.99);
@@ -363,7 +381,6 @@ function release(p) {
   if (v.length() > MAX_THROW) v.setLength(MAX_THROW);
   b.vel.copy(v);
   b.angVel.set(-v.y, v.x, rand(-1, 1)).multiplyScalar((0.12 * SPIN) / b.sizeMul);
-  b.escaping = Math.hypot(v.x, v.y) > ESCAPE_SPEED || v.z < -ESCAPE_SPEED;
   // let go: the slime boings back
   b.jv += Math.min(v.length() * 0.03, 0.8);
 }
@@ -398,7 +415,6 @@ function updatePointer(p, dt, now) {
     const b = p.held;
     let z;
     if (p.kind === 'hand') {
-      p.zOffset *= Math.exp(-dt * 2.5);
       z = p.gz + p.zOffset;
     } else {
       z = p.grabZ + p.wheelZ;
@@ -465,6 +481,7 @@ const depth = {
   lo: 0.22, hi: 0.55,       // self-calibrating reach (meters) for the metric method
 };
 let faceLandmarker = null;
+const trayHit = new THREE.Vector3();
 let lastFaceTime = -1, faceFrame = 0;
 
 // 0 = front of the room (near the screen), 1 = back
@@ -556,7 +573,29 @@ function processHands(result, now) {
     }
     // fall back gracefully: mirror needs a face, metric needs a pose
     p.method = depth.method in p.zByMethod ? depth.method : 'metric' in p.zByMethod ? 'metric' : 'palm';
-    const zRaw = p.zByMethod[p.method];
+    const zMeasured = p.zByMethod[p.method];
+
+    // screen height over the tray -> depth on the tray
+    let zRaw = zMeasured;
+    p.trayW = 0;
+    if (p.held) {
+      // holding: keep the contribution it had at the grab, so lifting a stone
+      // doesn't push it deeper (only real hand motion toward/away moves it)
+      zRaw = zMeasured + (p.frozenShift || 0);
+    } else if (pileFade > 0.01) {
+      let sx = 0, sy = 0;
+      for (const id of [0, 5, 9, 17]) { const q = lmToScreen(lm[id]); sx += q[0] / 4; sy += q[1] / 4; }
+      ndc.set((sx / W) * 2 - 1, -(sy / H) * 2 + 1);
+      raycaster.setFromCamera(ndc, camera);
+      const hit = rayTray(raycaster.ray.origin, raycaster.ray.direction, trayHit);
+      if (hit) {
+        p.trayZ = hit.addScaledVector(raycaster.ray.direction, -PILE_LIFT).z;
+        p.trayW = TRAY_DEPTH * pileFade * THREE.MathUtils.smoothstep(sy / H, 0.4, 0.7);
+        zRaw = THREE.MathUtils.lerp(zMeasured, p.trayZ, p.trayW);
+      }
+    }
+    const zShift = zRaw - zMeasured;  // applied to every joint, keeping the hand's own shape
+    if (!p.held) p.frozenShift = zShift;
     p.handZ = continuous ? p.handZ + (zRaw - p.handZ) * 0.3 : zRaw;
     let lmZ;
     if (p.method === 'palm') {
@@ -566,7 +605,7 @@ function processHands(result, now) {
     } else {
       // each joint's own metric depth, smoothed with the hand
       const shift = p.dist - pose.z;
-      lmZ = (id) => metersToZ(pose.z + shift + world[id].z * pose.sz, p.method);
+      lmZ = (id) => metersToZ(pose.z + shift + world[id].z * pose.sz, p.method) + zShift;
     }
 
     // pinch point
@@ -686,7 +725,7 @@ function collideStones() {
       n.divideScalar(d);
       const ia = isHeld(a) ? 0 : 1 / a.mass, ib = isHeld(b) ? 0 : 1 / b.mass;
       if (ia + ib === 0) continue;
-      const overlap = minD - d;
+      const overlap = Math.min(minD - d, minD * 0.25); // resolve deep overlaps gradually, no launches
       a.pos.addScaledVector(n, (overlap * ia) / (ia + ib));
       b.pos.addScaledVector(n, (-overlap * ib) / (ia + ib));
       rv.copy(a.vel).sub(b.vel);
@@ -712,35 +751,39 @@ function bounds(dt) {
   for (const b of beads) {
     if (b.state !== 'free' || isHeld(b)) continue;
     const { hw, hh } = halfExtents(b.pos.z);
-    if (b.escaping) {
-      if (Math.abs(b.pos.x) > hw + b.r * 1.5 || b.pos.z < -40 || (!gravityOn && Math.abs(b.pos.y) > hh + b.r * 1.5)) {
-        b.state = 'gone'; b.mesh.visible = false; b.goneTimer = 0.9;
-        continue;
-      }
-    } else {
-      if (b.pos.x > hw - b.r) { b.pos.x = hw - b.r; if (b.vel.x > 0) b.vel.x *= -RESTITUTION; }
-      if (b.pos.x < -hw + b.r) { b.pos.x = -hw + b.r; if (b.vel.x < 0) b.vel.x *= -RESTITUTION; }
-      if (!gravityOn) {
-        if (b.pos.y > hh - b.r) { b.pos.y = hh - b.r; if (b.vel.y > 0) b.vel.y *= -RESTITUTION; }
-        if (b.pos.y < -hh + b.r) { b.pos.y = -hh + b.r; if (b.vel.y < 0) b.vel.y *= -RESTITUTION; }
-      }
-      if (b.pos.z < Z_MIN + b.r) { b.pos.z = Z_MIN + b.r; if (b.vel.z < 0) b.vel.z *= -RESTITUTION; }
-    }
-    if (b.pos.z > Z_MAX - b.r) { b.pos.z = Z_MAX - b.r; if (b.vel.z > 0) b.vel.z *= -RESTITUTION; }
+    // the screen is the room: stones bounce off its edges and never leave it
+    if (b.pos.x > hw - b.r) { b.pos.x = hw - b.r; if (b.vel.x > 0) b.vel.x *= -RESTITUTION; }
+    if (b.pos.x < -hw + b.r) { b.pos.x = -hw + b.r; if (b.vel.x < 0) b.vel.x *= -RESTITUTION; }
+    if (b.pos.y > hh - b.r) { b.pos.y = hh - b.r; if (b.vel.y > 0) b.vel.y *= -RESTITUTION; }
+    if (!gravityOn && b.pos.y < -hh + b.r) { b.pos.y = -hh + b.r; if (b.vel.y < 0) b.vel.y *= -RESTITUTION; }
+    if (b.pos.z < Z_MIN + b.r) { b.pos.z = Z_MIN + b.r; if (b.vel.z < 0) b.vel.z *= -RESTITUTION; }
+    const front = gravityOn ? PILE_FRONT_Z : Z_MAX;
+    if (b.pos.z > front - b.r) { b.pos.z = front - b.r; if (b.vel.z > 0) b.vel.z *= -RESTITUTION; }
 
     if (gravityOn) {
-      const pen = floorHeight(b.pos.x, b.pos.z) + b.r - b.pos.y;
+      // a table under the bowl catches anything that falls out of it
+      if (b.pos.y < TABLE_Y + b.r) {
+        b.pos.y = TABLE_Y + b.r;
+        if (b.vel.y < 0) { if (b.vel.y < -1.5) jellyKick(b, UP, -b.vel.y); b.vel.y *= b.vel.y < -1.5 ? -FLOOR_BOUNCE : 0; }
+        b.onFloor = true; b.floorN.copy(UP);
+      }
+      const rimPen = trayRim(b.pos, b.r, n);
+      if (rimPen > 0) {
+        b.pos.addScaledVector(n, rimPen);
+        const vn = b.vel.dot(n);
+        if (vn < 0) b.vel.addScaledVector(n, -(1 + (vn < -1.5 ? FLOOR_BOUNCE : 0)) * vn);
+      }
+      const pen = trayPlane(b.pos, b.r, n);
+      if (pen > -0.02) { b.onFloor = true; b.floorN.copy(n); } // resting contact counts too
       if (pen > 0) {
-        floorNormal(b.pos.x, b.pos.z, n);
-        b.pos.addScaledVector(n, pen * n.y);
+        b.pos.addScaledVector(n, pen);
+        b.floorN.copy(n);
         const vn = b.vel.dot(n);
         if (vn < 0) {
           b.vel.addScaledVector(n, -(1 + (vn < -1.5 ? FLOOR_BOUNCE : 0)) * vn);
           jellyKick(b, n, -vn);
         }
-        tang.copy(b.vel).addScaledVector(n, -b.vel.dot(n));
-        b.vel.addScaledVector(tang, -(1 - Math.exp(-dt * FLOOR_FRICTION)));
-        b.onFloor = true;
+        b.onFloor = true;  // friction is applied once per frame, after all passes
       }
     }
   }
@@ -750,11 +793,6 @@ function physics(dt) {
   for (const b of beads) { b.jTarget = 0; b.onFloor = false; }
 
   for (const b of beads) {
-    if (b.state === 'gone') {
-      b.goneTimer -= dt;
-      if (b.goneTimer <= 0) spawn(b);
-      continue;
-    }
     b.spawnT = Math.min(1, b.spawnT + dt / 1.2);
     if (b.state === 'spawning') {
       const e = 1 - Math.pow(1 - b.spawnT, 3);
@@ -768,7 +806,7 @@ function physics(dt) {
       if (h1) {
         // two hands: the stone sits between them and scales with their spread
         mid.addVectors(h0.target, h1.target).multiplyScalar(0.5);
-        b.pos.lerp(mid, 1 - Math.exp(-dt * 20));
+        b.pos.lerp(mid, 1 - Math.exp(-dt * HOLD_FOLLOW * 0.8));
         const spread = Math.hypot(h0.target.x - h1.target.x, h0.target.y - h1.target.y);
         const ratio = spread / b.stretch0;
         const want = clamp(b.size0 * ratio, MIN_SIZE, MAX_SIZE);
@@ -776,7 +814,7 @@ function physics(dt) {
         b.jAxis.subVectors(h1.target, h0.target).normalize();
         b.jTarget = clamp((ratio - 1) * 0.2, -0.2, 0.35);
       } else {
-        b.pos.lerp(h0.target, 1 - Math.exp(-dt * 24));
+        b.pos.lerp(h0.target, 1 - Math.exp(-dt * HOLD_FOLLOW));
         if (h0.gripMode === 'fist') {
           // squeezing a fist squishes the slime flat
           b.jAxis.set(0, 1, 0);
@@ -797,12 +835,11 @@ function physics(dt) {
         // gentle buoyant float; drift back only if a stone wanders out of the comfortable range
         b.vel.y += Math.sin(time * 0.6 + b.seed) * 0.05 * dt;
         b.vel.x += Math.cos(time * 0.45 + b.seed * 1.7) * 0.035 * dt;
-        if (!b.escaping) b.vel.z += (clamp(b.pos.z, -5.5, 1.8) - b.pos.z) * 0.8 * dt;
+        b.vel.z += (clamp(b.pos.z, -5.5, 1.8) - b.pos.z) * 0.8 * dt;
       }
-      b.vel.multiplyScalar(Math.exp(-dt * (b.escaping ? ESCAPE_DRAG : gravityOn ? PILE_DRAG : FLOAT_DRAG)));
+      b.vel.multiplyScalar(Math.exp(-dt * (gravityOn ? PILE_DRAG : FLOAT_DRAG)));
       b.pos.addScaledVector(b.vel, dt);
       if (!gravityOn) b.angVel.lerp(b.idleSpin, 1 - Math.exp(-dt * 0.6));
-      if (b.escaping && b.vel.length() < 4) b.escaping = false;
     }
   }
 
@@ -810,12 +847,22 @@ function physics(dt) {
   const iterations = gravityOn ? 4 : 1;
   for (let k = 0; k < iterations; k++) { collideStones(); bounds(dt / iterations); }
 
+  // Coulomb friction on the platter, stronger than the slope's pull, so stones rest
+  // where they are on the tilted dish (like a pie being shown off)
+  for (const b of beads) {
+    if (!b.onFloor || isHeld(b) || b.state !== 'free') continue;
+    const fn = b.floorN;
+    tang.copy(b.vel).addScaledVector(fn, -b.vel.dot(fn));
+    const tl = tang.length(), drop = TRAY_GRIP * GRAVITY * Math.max(fn.y, 0) * dt;
+    b.vel.addScaledVector(tang, tl <= drop ? -1 : -drop / tl);
+  }
+
   for (const b of beads) {
     if (b.state === 'gone') continue;
     // rolling on the tray
     if (b.onFloor && !isHeld(b)) {
       const rolling = b.vel.lengthSq() > 0.25;
-      b.angVel.lerp(rolling ? axis.set(b.vel.z, 0, -b.vel.x).multiplyScalar(0.5 / b.r) : axis.set(0, 0, 0), 1 - Math.exp(-dt * 4));
+      b.angVel.lerp(rolling ? axis.crossVectors(b.floorN, b.vel).multiplyScalar(0.5 / b.r) : axis.set(0, 0, 0), 1 - Math.exp(-dt * 4));
       if (b.vel.lengthSq() < 0.04) b.vel.multiplyScalar(0.5); // settle
     }
     if (!isHeld(b)) b.angVel.multiplyScalar(Math.exp(-dt * SPIN_DAMP));
@@ -833,11 +880,13 @@ function physics(dt) {
 
 // ---------- visuals ----------
 let focusZ = 0;
+const trayPt = new THREE.Vector3(), trayN = new THREE.Vector3(), trayQ = new THREE.Quaternion();
+const UP = new THREE.Vector3(0, 1, 0);
 
 function updateVisuals(dt) {
   pileFade += ((gravityOn ? 1 : 0) - pileFade) * (1 - Math.exp(-dt * 3));
   const real = shared.uHasVideo.value;      // camera on: no fake grid over the real room
-  floor.material.uniforms.uOpacity.value = pileFade * (1 - real);
+  floor.userData.setOpacity(pileFade * (real ? 0.75 : 1));
   floor.visible = pileFade > 0.01;
 
   // camera focus follows what you're interacting with
@@ -886,13 +935,22 @@ function updateVisuals(dt) {
 
     // contact shadow + caustic on the tray, softer and fainter the higher the stone
     if (pileFade > 0.01) {
-      const fy = floorHeight(b.pos.x, b.pos.z);
-      const height = Math.max(0, b.pos.y - b.r - fy);
+      // in the bowl: sit on its surface, facing along it; out of it: on the table
+      let height;
+      if (trayPlane(b.pos, b.r, trayN) === -Infinity) {
+        trayPt.set(b.pos.x, TABLE_Y, b.pos.z); trayN.copy(UP);
+        height = Math.max(0, b.pos.y - b.r - TABLE_Y);
+      } else {
+        height = Math.max(0, trayProbe(b.pos, trayPt, trayN) - b.r);
+      }
       const k = clamp(1 - height / 5, 0, 1) * pileFade * back;
-      b.shadow.position.set(b.pos.x, fy + 0.01, b.pos.z);
+      trayQ.setFromUnitVectors(UP, trayN);
+      b.shadow.position.copy(trayPt).addScaledVector(trayN, 0.01);
+      b.shadow.quaternion.copy(trayQ);
       b.shadow.scale.setScalar(b.r * 2.6 * (1 + height * 0.25));
       b.shadow.material.opacity = 0.55 * k * (real ? 0.6 : 1);
-      b.caustic.position.set(b.pos.x + 0.12 * b.r, fy + 0.02, b.pos.z + 0.25 * b.r);
+      b.caustic.position.copy(trayPt).addScaledVector(trayN, 0.02).add(tmpV.set(0.12 * b.r, 0, 0.25 * b.r).applyQuaternion(trayQ));
+      b.caustic.quaternion.copy(trayQ);
       b.caustic.scale.setScalar(b.r * 1.3 * (1 + height * 0.15));
       b.caustic.material.opacity = 0.55 * k * (0.4 + b.stone.tintAmt) * (real ? 0.5 : 1);
     }
@@ -1064,6 +1122,7 @@ function updateStats(now) {
     const f = (v) => (v == null ? '  —  ' : v.toFixed(2).padStart(5));
     lines.push(`hand ${k + 1}   ${p.dist ? cm(p.dist) : '—'}` + (faceFresh(now) && p.dist ? `  ·  ${(p.dist / depth.faceDist).toFixed(2)}× face` : ''));
     lines.push(`  z  mirror ${f(z.mirror)}  metric ${f(z.metric)}  palm ${f(z.palm)}`);
+    if (p.trayW > 0.01) lines.push(`  screen height → tray z ${p.trayZ.toFixed(2)}  (${Math.round(p.trayW * 100)}% weight)`);
     lines.push(`  using ${p.method}${p.poseErr != null ? `  ·  fit ±${p.poseErr.toFixed(1)}px` : ''}`);
   });
   if (shared.uHasVideo.value) lines.push(`exposure ×${shared.uExposure.value.toFixed(2)}  black −${shared.uBlack.value.toFixed(3)}  (auto)`);
@@ -1083,8 +1142,6 @@ document.getElementById('reset').addEventListener('click', resetAll);
 
 document.getElementById('nocam').addEventListener('click', () => {
   enter();
-  setStatus('Mouse mode · drag to throw · scroll = depth · shift+scroll = size');
-  setTimeout(() => setStatus(''), 6000);
 });
 
 document.getElementById('start').addEventListener('click', async () => {
@@ -1123,13 +1180,12 @@ document.getElementById('start').addEventListener('click', async () => {
   }
   setStatus('Loading hand tracking…');
   landmarker = await landmarkerPromise;
-  setStatus(landmarker ? 'Raise a hand ✋' : 'Hand tracking failed to load — mouse still works');
+  setStatus(landmarker ? '' : 'Hand tracking failed to load — mouse still works');
 });
 video.addEventListener('loadedmetadata', updateVideoScale);
 
 // ---------- loop ----------
 let last = performance.now();
-let everSawHand = false;
 function frame(now) {
   const dt = Math.min((now - last) / 1000, 1 / 30);
   last = now;
@@ -1141,11 +1197,6 @@ function frame(now) {
     // face distance changes slowly: sample it every third frame
     if (faceLandmarker && ++faceFrame % 3 === 0) processFace(faceLandmarker.detectForVideo(video, now), now);
     processHands(landmarker.detectForVideo(video, now), now);
-    if (!everSawHand && handPtrs.some((p) => p.visible)) {
-      everSawHand = true;
-      setStatus('Open hand to touch · pinch or fist to grab · two hands to stretch');
-      setTimeout(() => setStatus(''), 5000);
-    }
   } else {
     for (const p of handPtrs) if (p.visible && now - p.lastSeen > HAND_GRACE_MS) hideHand(p);
   }
@@ -1160,6 +1211,10 @@ function frame(now) {
 }
 
 resize();
+// pour the stones in and let physics settle them before anyone sees a frame,
+// so the page opens on a pile that gravity made
+beads.forEach((b) => pour(b, b.homeOrder));
+for (let k = 0; k < 420; k++) physics(1 / 60);
 requestAnimationFrame(frame);
 
 // handy from the devtools console: __glass.beads, __glass.hands, __glass.reset()

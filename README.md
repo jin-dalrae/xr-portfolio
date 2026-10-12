@@ -66,7 +66,7 @@ Constants at the top of [`src/main.js`](src/main.js):
 - `GRAVITY`, `TRAY_GRIP`, `RESTITUTION`: how heavy the stones feel.
 - `TRAY_DEPTH`, `PILE_LIFT`: how much screen height drives depth over the bowl.
 - `WALL_THROW`: released over the wall slower than this, a stone sticks.
-- In [`src/floor.js`](src/floor.js): `FLOOR_Y`, `BOWL_X`, `BOWL_Z` for the bowl's height and curvature.
+- In [`src/floor.js`](src/floor.js): `FLOOR_Y`, `BOWL_X`, `BOWL_Z`, `TILT` for the bowl's height, curvature and tip toward the viewer.
 - In [`src/wall.js`](src/wall.js): `WALL_ROWS`, `DEFAULT_LABELS`, `WALL_Z`, `WALL_YAW` for the board's categories and placement.
 - `SQUISH_SPEED`, `MAX_DENT`, `JELLY_K` / `JELLY_C`: how soft the slime is.
 

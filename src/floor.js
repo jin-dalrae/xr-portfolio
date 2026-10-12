@@ -1,13 +1,16 @@
 import * as THREE from 'three';
 
 // A shallow glass bowl: a wide, gently curved floor so the pile gathers in front of you.
-export const FLOOR_Y = -2.7;
-const BOWL_X = 0.03, BOWL_Z = 0.05, BOWL_ZC = -1;
+// TILT raises the back, tipping the bowl toward the viewer so the pile faces the camera.
+export const FLOOR_Y = -3.05;
+const BOWL_X = 0.03, BOWL_Z = 0.05, BOWL_ZC = -1.5;
+const TILT = 0.12;
+const LOW_Z = BOWL_ZC + TILT / (2 * BOWL_Z);   // where the bowl bottoms out (the pile's center)
 export const TRAY_RADIUS = 3.2;   // area the stones are poured over
 export const RIM_TUBE = 0;
 
-const floorHeight = (x, z) => FLOOR_Y + BOWL_X * x * x + BOWL_Z * (z - BOWL_ZC) ** 2;
-const floorNormal = (x, z, out) => out.set(-2 * BOWL_X * x, 1, -2 * BOWL_Z * (z - BOWL_ZC)).normalize();
+const floorHeight = (x, z) => FLOOR_Y + BOWL_X * x * x + BOWL_Z * (z - BOWL_ZC) ** 2 - TILT * (z - BOWL_ZC);
+const floorNormal = (x, z, out) => out.set(-2 * BOWL_X * x, 1, -(2 * BOWL_Z * (z - BOWL_ZC) - TILT)).normalize();
 
 // Point on the bowl under p and its normal; returns p's distance above it.
 export function trayProbe(p, outPoint, outNormal) {
@@ -45,7 +48,7 @@ export function rayTray(origin, dir, out, maxT = 40) {
 }
 
 // Bowl-centered (x, z) -> world point on its surface.
-export const trayAt = (x, z, out) => out.set(x, floorHeight(x, z + BOWL_ZC), z + BOWL_ZC);
+export const trayAt = (x, z, out) => out.set(x, floorHeight(x, z + LOW_Z), z + LOW_Z);
 
 export function makeFloor() {
   const geo = new THREE.PlaneGeometry(36, 24, 96, 64);

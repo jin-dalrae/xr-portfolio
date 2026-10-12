@@ -44,7 +44,7 @@ const TOUCH_GLOW_DIST = 0.8;              // stones glow when a fingertip is thi
 
 const GRAVITY = 22;                       // heavy glass: falls and settles fast
 const FLOAT_DRAG = 0.8, PILE_DRAG = 0.25;
-const TABLE_Y = -3.6;                     // invisible table under the bowl (pile mode)
+const TABLE_Y = -4.3;                     // invisible table under the bowl (pile mode)
 const PILE_FRONT_Z = 1.0;                 // keeps stones on the table in view
 const RESTITUTION = 0.5, FLOOR_BOUNCE = 0.3;   // glass clinks: lively, but gravity keeps it heavy
 const TRAY_GRIP = 0.55;                   // friction in the bowl: stones roll a little, then settle

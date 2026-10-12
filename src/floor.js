@@ -2,7 +2,7 @@ import * as THREE from 'three';
 
 // A shallow glass bowl: a wide, gently curved floor so the pile gathers in front of you.
 // TILT raises the back, tipping the bowl toward the viewer so the pile faces the camera.
-export const FLOOR_Y = -3.05;
+export const FLOOR_Y = -3.55;
 const BOWL_X = 0.03, BOWL_Z = 0.05, BOWL_ZC = -1.5;
 const TILT = 0.12;
 const LOW_Z = BOWL_ZC + TILT / (2 * BOWL_Z);   // where the bowl bottoms out (the pile's center)

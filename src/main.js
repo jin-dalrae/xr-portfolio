@@ -43,11 +43,11 @@ const MAX_DENT = 0.35;                    // fraction of radius a stone can be d
 const TOUCH_GLOW_DIST = 0.8;              // stones glow when a fingertip is this close
 
 const GRAVITY = 22;                       // heavy glass: falls and settles fast
-const FLOAT_DRAG = 0.8, PILE_DRAG = 0.25;
+const FLOAT_DRAG = 0.8, PILE_DRAG = 0.05;    // pile: almost no air drag, so falls look like falls
 const TABLE_Y = -4.3;                     // invisible table under the bowl (pile mode)
 const PILE_FRONT_Z = 2.0;                 // stones resting farther forward than this glide back
 const RESTITUTION = 0.5, FLOOR_BOUNCE = 0.3;   // glass clinks: lively, but gravity keeps it heavy
-const TRAY_GRIP = 0.55;                   // friction in the bowl: stones roll a little, then settle
+const TRAY_GRIP = 0.25;                   // friction in the bowl: stones roll down and settle at the bottom
 const THROW_BOOST = 1.0;
 const FLICK_SPEED = 16;                   // fast hand + loosening grip = release now
 const MAX_THROW = 30;
@@ -173,7 +173,11 @@ const beads = ALL_STONES.map((stone, i) => {
   scene.add(mesh);
   const { shadow, caustic } = makeShadow(stone.tint);
   scene.add(shadow, caustic);
-  const baseR = geo.boundingSphere.radius * stone.size * 0.92;
+  // collide as a sphere of the stone's average size, not its longest side, so flat
+  // pebbles, eggs and rings rest on things instead of hovering above them
+  geo.computeBoundingBox();
+  const bb = geo.boundingBox;
+  const baseR = ((bb.max.x - bb.min.x) + (bb.max.y - bb.min.y) + (bb.max.z - bb.min.z)) / 6 * stone.size * 0.97;
   return {
     id: i, stone, mesh, mat, shadow, caustic,
     wall: null, wallTarget: new THREE.Vector3(),
@@ -776,7 +780,7 @@ function collideStones() {
         a.vel.addScaledVector(n, jImp * ia);
         b.vel.addScaledVector(n, -jImp * ib);
         tang.copy(rv).addScaledVector(n, -vn);
-        const fr = gravityOn ? 0.15 : 0;  // contact friction keeps stacks from sliding apart
+        const fr = 0;  // no stone-on-stone grip: stones slide off each other instead of hanging in mid-air
         a.vel.addScaledVector(tang, (-fr * ia) / (ia + ib));
         b.vel.addScaledVector(tang, (fr * ib) / (ia + ib));
         a.angVel.add(axis.crossVectors(n, tang).multiplyScalar(-0.3 * SPIN * ia * a.mass));
@@ -911,7 +915,6 @@ function physics(dt) {
     if (b.onFloor && !isHeld(b)) {
       const rolling = b.vel.lengthSq() > 0.25;
       b.angVel.lerp(rolling ? axis.crossVectors(b.floorN, b.vel).multiplyScalar(0.85 / b.r) : axis.set(0, 0, 0), 1 - Math.exp(-dt * 4));
-      if (b.vel.lengthSq() < 0.04) b.vel.multiplyScalar(0.5); // settle
     }
     if (!isHeld(b)) b.angVel.multiplyScalar(Math.exp(-dt * SPIN_DAMP));
     if (b.angVel.length() > MAX_SPIN) b.angVel.setLength(MAX_SPIN);
@@ -934,7 +937,8 @@ const UP = new THREE.Vector3(0, 1, 0);
 function updateVisuals(dt) {
   pileFade += ((gravityOn ? 1 : 0) - pileFade) * (1 - Math.exp(-dt * 3));
   const real = shared.uHasVideo.value;      // camera on: no fake grid over the real room
-  floor.userData.setOpacity(pileFade * (1 - real)); // camera on: no grid over the real room
+  floor.userData.setOpacity(pileFade);
+  floor.userData.setReal(real);  // camera on: a subtle glass dish instead of the grid
   floor.visible = pileFade > 0.01;
 
   // camera focus follows what you're interacting with
@@ -996,7 +1000,7 @@ function updateVisuals(dt) {
       b.shadow.position.copy(trayPt).addScaledVector(trayN, 0.01);
       b.shadow.quaternion.copy(trayQ);
       b.shadow.scale.setScalar(b.r * 2.6 * (1 + height * 0.25));
-      b.shadow.material.opacity = 0.55 * k * (real ? 0.6 : 1);
+      b.shadow.material.opacity = 0.55 * k * (real ? 0.85 : 1);
       b.caustic.position.copy(trayPt).addScaledVector(trayN, 0.02).add(tmpV.set(0.12 * b.r, 0, 0.25 * b.r).applyQuaternion(trayQ));
       b.caustic.quaternion.copy(trayQ);
       b.caustic.scale.setScalar(b.r * 1.3 * (1 + height * 0.15));

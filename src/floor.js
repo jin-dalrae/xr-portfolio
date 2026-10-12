@@ -58,7 +58,7 @@ export function makeFloor() {
   for (let i = 0; i < pos.count; i++) pos.setY(i, floorHeight(pos.getX(i), pos.getZ(i)));
 
   const mat = new THREE.ShaderMaterial({
-    uniforms: { uOpacity: { value: 1 } },
+    uniforms: { uOpacity: { value: 1 }, uReal: { value: 0 }, uCenter: { value: new THREE.Vector2(0, LOW_Z) } },
     transparent: true,
     depthWrite: false,
     vertexShader: /* glsl */ `
@@ -71,14 +71,28 @@ export function makeFloor() {
     `,
     fragmentShader: /* glsl */ `
       uniform float uOpacity;
+      uniform float uReal;      // 0 = grid backdrop, 1 = glass dish over the camera
+      uniform vec2 uCenter;
       varying vec3 vW;
       void main() {
+        // grid (mouse mode)
         vec2 g = abs(fract(vW.xz * 1.0) - 0.5) / fwidth(vW.xz);
         float line = 1.0 - min(min(g.x, g.y), 1.0);
         float fade = smoothstep(-8.0, -2.0, vW.z) * smoothstep(4.6, 2.4, vW.z)
                    * (1.0 - smoothstep(4.0, 9.0, abs(vW.x)));
-        float a = (0.05 + line * 0.16) * fade * uOpacity;
-        gl_FragColor = vec4(vec3(0.85, 0.92, 1.0), a);
+        float gridA = (0.05 + line * 0.16) * fade;
+
+        // glass dish (camera mode): a faint surface with a bright rim, so the stones
+        // visibly rest on something in your room
+        vec2 d = (vW.xz - uCenter) / vec2(4.8, 3.0);
+        float r = length(d);
+        float dish = 1.0 - smoothstep(0.96, 1.0, r);
+        float rim = smoothstep(0.84, 0.97, r) * dish;
+        float sheen = smoothstep(0.45, 0.0, abs(d.x * 0.6 + d.y * 0.8 - 0.3)) * 0.07;
+        float glassA = dish * (0.08 + 0.3 * rim + sheen);
+
+        float a = mix(gridA, glassA, uReal) * uOpacity;
+        gl_FragColor = vec4(mix(vec3(0.85, 0.92, 1.0), vec3(0.96, 0.98, 1.0), uReal), a);
         #include <colorspace_fragment>
       }
     `,
@@ -86,6 +100,7 @@ export function makeFloor() {
   const mesh = new THREE.Mesh(geo, mat);
   mesh.renderOrder = -0.5;
   mesh.userData.setOpacity = (o) => { mat.uniforms.uOpacity.value = o; };
+  mesh.userData.setReal = (r) => { mat.uniforms.uReal.value = r; };
   return mesh;
 }
 

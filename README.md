@@ -29,7 +29,7 @@ Best on a desktop or laptop with a webcam, in Chrome, Safari, Arc or Edge. Every
 
 Some decisions that shaped the interaction:
 
-- **Physical, not generated.** Stones never pop in, respawn or vanish. They're poured into the bowl and the physics settles them before the first frame, so the page opens on a pile gravity made. A thrown stone stays in the room until you put it back.
+- **Physical, not generated.** Stones rest in a visible glass dish (an invisible surface made them look like they were floating), and they never pop in, respawn or vanish. They're poured into the bowl and the physics settles them before the first frame, so the page opens on a pile gravity made. A thrown stone stays in the room until you put it back.
 - **Your hand is the cursor.** No dots, skeletons or rings on your hand, and no on-screen instructions. Stones glow softly when they're within reach, and real fingers pass in front of the glass that's behind them.
 - **Open hand touches, closed hand grabs.** Early on, fingertips shoved away the very stone you were reaching to pinch. Making the open hand physical and the pinching or fisted hand a grabber resolved it.
 - **Throws that survive motion blur.** A fast flick blurs the hand and the camera loses it at exactly the moment you let go. Throw velocity is taken from the last moments the hand was tracked, and a loosening grip at speed releases right away.
@@ -51,7 +51,7 @@ Some decisions that shaped the interaction:
 
   Every joint gets its own depth, so a finger pointing at the screen reaches deeper than the palm behind it. Over the bowl, screen height adds a second cue: like a table in perspective, lower on screen is nearer. It's blended in, and frozen while you hold a stone so lifting it doesn't push it deeper.
 - **Matching the room:** the feed is decoded to linear light with automatic black-level and exposure correction (bright rooms make webcams run hot and hazy). A 64×36 probe of each frame finds the room's average color and brightest light for the glass's tint and reflections. A soft depth mask drawn from the hand skeleton lets real hands cover the glass behind them, and stones cast shadows onto the hand beneath them.
-- **Physics:** a small custom solver tuned for heavy but lively glass: strong gravity with real bounce, clink and wobble; friction in the bowl so stones roll a little, then settle; sphere–sphere impulses with resting contacts; screen-edge walls, a ceiling and an invisible table so nothing leaves the room. Hands are kinematic colliders with swept tests so fast swipes don't tunnel, and held stones trail the hand slightly for weight.
+- **Physics:** a small custom solver tuned for heavy but lively glass: strong gravity with real bounce, clink and wobble; light friction, so stones roll down into the bowl and slide off each other instead of hanging in mid-air; each stone collides as a sphere of its average size, so flat stones and rings rest on things rather than hovering; sphere–sphere impulses with resting contacts; screen-edge walls, a ceiling and an invisible table so nothing leaves the room. Hands are kinematic colliders with swept tests so fast swipes don't tunnel, and held stones trail the hand slightly for weight.
 
 ## Run locally
 

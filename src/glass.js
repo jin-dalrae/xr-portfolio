@@ -241,6 +241,8 @@ export function makeGlassMaterial(shared, stone) {
         }
         refr /= 12.0;
         refr = mix(refr, vec3(dot(refr, vec3(0.333))), 0.2 * uFrost) + 0.05 * uFrost;  // milky
+        // over a bright, busy room, glass needs a little depth or it reads as a flat sticker
+        refr = mix(refr, pow(refr, vec3(1.25)) * 0.92, uHasVideo);
 
         vec3 tint = uTint;
         float room = uHasVideo;  // 1 = match the real room, 0 = studio look
@@ -252,7 +254,7 @@ export function makeGlassMaterial(shared, stone) {
         float thick = mix(0.3, 1.0, ndv);
         vec3 trans = pow(max(tint, vec3(0.02)), vec3(uTintAmt * 1.5 * thick));
         vec3 body = refr * trans;
-        body += tint * 0.04 * ndv * (1.0 - room);
+        body += tint * 0.04 * ndv;
         vec3 lit = mix(vec3(1.0), ambTint * clamp(ambLum * 3.0, 0.45, 1.2), room);
 
         if (uTex > 1.5 && uTex < 2.5) {
@@ -282,12 +284,12 @@ export function makeGlassMaterial(shared, stone) {
 
         // Darker band just inside the silhouette (total internal reflection).
         float band = smoothstep(0.35, 0.7, rim) * (1.0 - smoothstep(0.8, 0.98, rim));
-        body *= 1.0 - 0.3 * band;
+        body *= 1.0 - mix(0.3, 0.45, room) * band;   // the darker band that outlines real glass
 
         // Thin-film iridescence on the rim.
         vec3 irid = 0.5 + 0.5 * cos(6.28318 * (vec3(0.0, 0.33, 0.67) + fres * 1.2 + uIridShift));
         vec3 rimCol = mix(vec3(1.0), irid, uIrid * 0.45) * mix(vec3(1.0), tint, 0.3);
-        rimCol *= mix(vec3(1.0), ambTint * clamp(ambLum * 3.0, 0.45, 1.1), room);
+        rimCol *= mix(vec3(1.0), ambTint, 0.3 * room);   // the room only tints the rim
 
         // Studio lighting in view space: softbox overhead + two sharp highlights.
         vec3 r = reflect(-v, n);
@@ -308,9 +310,11 @@ export function makeGlassMaterial(shared, stone) {
         vec3 roomLight = envC * (0.06 + 0.5 * fres) + uKeyColor * kspec;
 
         vec3 col = body;
-        col += rimCol * fres * mix(0.8, 0.45, room);
-        col += mix(studio, roomLight, room);
-        col += uHover * (fres * 0.9 + 0.07) * mix(vec3(1.0), tint, 0.5) * mix(1.0, 0.6, room);
+        // the same crisp studio light in both modes; the room tints it and adds a reflection
+        col += rimCol * fres * 0.8;
+        col += studio * mix(vec3(1.0), uKeyColor, 0.3 * room);
+        col += roomLight * 0.35 * room;
+        col += uHover * (fres * 0.9 + 0.07) * mix(vec3(1.0), tint, 0.5);
 
         col = mix(col, sceneBg(suv) * mix(0.7, 0.95, room) + tint * 0.03, uHaze * mix(1.0, 0.5, room));
 

@@ -131,14 +131,9 @@ function resize() {
   updateVideoScale();
 }
 
-// With the camera on, render the glass at roughly the camera's own resolution:
-// webcam video is soft, and razor-sharp CG on top of it reads as a sticker.
-function renderPixelRatio() {
-  const dpr = Math.min(window.devicePixelRatio, 2);
-  if (!shared.uHasVideo.value || !video.videoWidth) return dpr;
-  const visibleVideoPx = video.videoWidth * shared.uVideoScale.value.x;
-  return clamp((visibleVideoPx / window.innerWidth) * 1.3, 1, dpr);
-}
+// Glass renders at full screen resolution in both modes: crisp edges and highlights are
+// what make it read as glass (matching the webcam's softness only made it look cheap).
+const renderPixelRatio = () => Math.min(window.devicePixelRatio, 2);
 
 // "cover" fit: fraction of the video visible on each axis
 function updateVideoScale() {

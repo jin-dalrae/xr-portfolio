@@ -39,6 +39,7 @@ html, body {
 
 .card {
   position: fixed;
+  z-index: 10;
   left: 50%;
   top: 50%;
   transform: translate(-50%, -50%);
@@ -157,3 +158,25 @@ kbd {
   color: rgba(255,255,255,.85);
   white-space: pre;
 }
+
+/* category labels on the wall: click to rename */
+.wall-label {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 1;
+  padding: 4px 11px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: .02em;
+  color: rgba(255,255,255,.85);
+  background: rgba(255,255,255,.14);
+  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(20px);
+  white-space: nowrap;
+  outline: none;
+  cursor: text;
+  user-select: text;
+}
+.wall-label:focus { background: rgba(255,255,255,.28); }

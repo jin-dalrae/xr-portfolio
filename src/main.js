@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { STONES, makeSmallStones, makeBackground, makeGlassMaterial, makeStoneGeometry, makeGlowTexture } from './glass.js';
 import { makeFloor, makeShadow, trayProbe, trayPlane, trayRim, rayTray, trayAt, TRAY_RADIUS, RIM_TUBE } from './floor.js';
 import { createRoomProbe, createHandMask } from './room.js';
+import { createWall } from './wall.js';
 import {
   createHandLandmarker, createFaceLandmarker, pinchRatio, palmSize, fingerCurl,
   solveHandPosition, faceDistance, focalPx, HAND_EDGES, WRIST, THUMB_TIP, INDEX_TIP,
@@ -48,6 +49,7 @@ const TRAY_GRIP = 0.9;                    // friction in the bowl: stones settle
 const THROW_BOOST = 0.85;                 // heavy stones leave the hand a little slower
 const FLICK_SPEED = 16;                   // fast hand + loosening grip = release now
 const MAX_THROW = 30;
+const WALL_THROW = 9;                     // released over the wall slower than this: it sticks
 const SPIN = 0.25;                        // overall spin multiplier (throws, hits, collisions)
 const MAX_SPIN = 2.5;                     // rad/s cap
 const SPIN_DAMP = 1.2;                    // how quickly spin settles
@@ -106,11 +108,10 @@ const handMask = createHandMask();
 shared.uHandMask.value = handMask.tex;
 shared.uEnv.value = room.envTex;
 scene.add(makeBackground(shared));
-const floor = makeFloor(makeGlassMaterial(shared, {
-  tint: '#eef4ff', tintAmt: 0.06, irid: 0.3, frost: 0, texture: 'clear',
-}));
-floor.userData.rim.material.uniforms.uLensR.value = 0.02;
+const floor = makeFloor();
 scene.add(floor);
+const wall = createWall(shared);
+scene.add(wall.mesh);
 
 let W = 1, H = 1;
 function resize() {
@@ -120,6 +121,8 @@ function resize() {
   handMask.resize(W, H);
   camera.aspect = W / H;
   camera.updateProjectionMatrix();
+  wall.place(halfExtents);
+  for (const b of beads) if (b.state === 'stuck') stickTarget(b);
   renderer.getDrawingBufferSize(shared.uResolution.value);
   shared.uAspect.value = W / H;
   const dpr = Math.min(window.devicePixelRatio, 2);
@@ -175,7 +178,8 @@ const beads = ALL_STONES.map((stone, i) => {
   scene.add(shadow, caustic);
   const baseR = geo.boundingSphere.radius * stone.size * 0.92;
   return {
-    stone, mesh, mat, shadow, caustic,
+    id: i, stone, mesh, mat, shadow, caustic,
+    wall: null, wallTarget: new THREE.Vector3(),
     baseR, r: baseR, size: stone.size, sizeMul: 1,
     mass: baseR ** 3,
     pos: mesh.position,
@@ -238,8 +242,29 @@ function pour(b, k) {
   trayAt(b.home.x, b.home.z, b.pos).y += b.r + 0.15 + (k % 3) * 0.35;
 }
 
+// ---------- the wall: stones stick to it in category rows, and can be pulled off ----------
+const stuck = () => beads.filter((b) => b.state === 'stuck');
+function stickTarget(b) { wall.toWorld(b.wall.x, b.wall.y, b.r * 0.85, b.wallTarget); }
+function stick(b, slot) {
+  b.state = 'stuck';
+  b.wall = slot;
+  stickTarget(b);
+  b.vel.set(0, 0, 0);
+  b.jv -= 0.6; // a soft press as it lands on the glass
+  b.jAxis.copy(wall.normal);
+  wall.remember(b.id, slot);
+}
+function unstick(b) {
+  if (b.state !== 'stuck') return;
+  b.state = 'free';
+  b.wall = null;
+  wall.remember(b.id, null);
+}
+
 function resetAll() {
   for (const p of pointers) p.held = null;
+  wall.forgetAll();
+  for (const b of beads) b.wall = null;
   if (!gravityOn) setMode('pile');
   beads.forEach((b) => {
     b.holders.length = 0;
@@ -267,6 +292,7 @@ function makePointer(kind) {
     pinchAmt: 0, ratio: 1, curl: 2, squeeze: 0,
     palmR: 0, handZ: 0, pinchZ: 0, zOffset: 0,
     held: null, gripMode: 'pinch', grabZ: 0, depthSm: 0, wheelZ: 0,
+    wallSlot: null, wallMag: 0,
     target: new THREE.Vector3(), raw: new THREE.Vector3(),
     history: [], fresh: false,
     hover: null, landmarks: null, wrist: null,
@@ -293,6 +319,7 @@ const mouse = makePointer('mouse');
 const pointers = [...handPtrs, mouse];
 
 const raycaster = new THREE.Raycaster();
+const wallPt = new THREE.Vector3();
 const ndc = new THREE.Vector2();
 function screenToWorld(x, y, z, out) {
   ndc.set((x / W) * 2 - 1, -(y / H) * 2 + 1);
@@ -325,6 +352,7 @@ function pick(x, y, z, p, slackMul = 1) {
 }
 
 function grab(p, b, mode) {
+  unstick(b);
   p.held = b;
   p.gripMode = mode;
   p.grabZ = b.pos.z; p.depthSm = b.pos.z; p.wheelZ = 0;
@@ -375,7 +403,10 @@ function release(p) {
   b.holders = b.holders.filter((h) => h !== p);
   const v = throwVelocity(p.history) || b.vel.clone();
   p.history.length = 0;
+  const slot = p.wallSlot;
+  p.wallSlot = null;
   if (b.holders.length) return; // the other hand still has it
+  if (slot && v.length() < WALL_THROW) { stick(b, slot); return; }
   v.multiplyScalar(THROW_BOOST);
   v.z *= 0.6; // depth from palm size is noisy; don't let it dominate a throw
   if (v.length() > MAX_THROW) v.setLength(MAX_THROW);
@@ -430,6 +461,17 @@ function updatePointer(p, dt, now) {
     p.target.copy(p.raw);
     p.target.x = clamp(p.target.x, -hw - b.r * 0.5, hw + b.r * 0.5);
     p.target.y = clamp(p.target.y, -hh - b.r * 0.5, hh + b.r * 0.5);
+
+    // carried over the wall: drawn onto its glass, into a free spot in that row
+    p.wallSlot = null;
+    if (b.holders.length === 1) {
+      ndc.set((p.gx / W) * 2 - 1, -(p.gy / H) * 2 + 1);
+      raycaster.setFromCamera(ndc, camera);
+      const hit = wall.hit(raycaster.ray.origin, raycaster.ray.direction, 0.2);
+      if (hit) p.wallSlot = wall.slot(b, hit.x, hit.y, stuck());
+    }
+    p.wallMag += ((p.wallSlot ? 1 : 0) - p.wallMag) * (1 - Math.exp(-dt * 8));
+    if (p.wallSlot) p.target.lerp(wall.toWorld(p.wallSlot.x, p.wallSlot.y, b.r * 1.4, wallPt), p.wallMag * 0.85);
     p.hover = null;
   } else {
     p.hover = grip ? null : pick(p.gx, p.gy, p.gz, p);
@@ -713,17 +755,18 @@ function handTouches() {
 function collideStones() {
   for (let i = 0; i < beads.length; i++) {
     const a = beads[i];
-    if (a.state !== 'free') continue;
+    if (a.state !== 'free' && a.state !== 'stuck') continue;
     for (let j = i + 1; j < beads.length; j++) {
       const b = beads[j];
-      if (b.state !== 'free') continue;
+      if (b.state !== 'free' && b.state !== 'stuck') continue;
       n.copy(a.pos).sub(b.pos);
       const minD = a.r + b.r;
       const d2 = n.lengthSq();
       if (d2 >= minD * minD || d2 < 1e-12) continue;
       const d = Math.sqrt(d2);
       n.divideScalar(d);
-      const ia = isHeld(a) ? 0 : 1 / a.mass, ib = isHeld(b) ? 0 : 1 / b.mass;
+      const ia = isHeld(a) || a.state === 'stuck' ? 0 : 1 / a.mass;
+      const ib = isHeld(b) || b.state === 'stuck' ? 0 : 1 / b.mass;
       if (ia + ib === 0) continue;
       const overlap = Math.min(minD - d, minD * 0.25); // resolve deep overlaps gradually, no launches
       a.pos.addScaledVector(n, (overlap * ia) / (ia + ib));
@@ -828,6 +871,10 @@ function physics(dt) {
         if (sp > 1) { b.jAxis.copy(b.vel).divideScalar(sp); b.jTarget = Math.min(sp * 0.012, 0.3); }
       }
       b.angVel.lerp(axis.set(-b.vel.y, b.vel.x, 0).multiplyScalar((0.05 * SPIN) / b.sizeMul), 1 - Math.exp(-dt * 4));
+    } else if (b.state === 'stuck') {
+      b.pos.lerp(b.wallTarget, 1 - Math.exp(-dt * 12));
+      b.vel.set(0, 0, 0);
+      b.angVel.multiplyScalar(Math.exp(-dt * 3));
     } else if (b.state === 'free') {
       if (gravityOn) {
         b.vel.y -= GRAVITY * dt;
@@ -886,7 +933,7 @@ const UP = new THREE.Vector3(0, 1, 0);
 function updateVisuals(dt) {
   pileFade += ((gravityOn ? 1 : 0) - pileFade) * (1 - Math.exp(-dt * 3));
   const real = shared.uHasVideo.value;      // camera on: no fake grid over the real room
-  floor.userData.setOpacity(pileFade * (real ? 0.75 : 1));
+  floor.userData.setOpacity(pileFade * (1 - real)); // camera on: no grid over the real room
   floor.visible = pileFade > 0.01;
 
   // camera focus follows what you're interacting with
@@ -898,7 +945,7 @@ function updateVisuals(dt) {
   const hovered = new Set(pointers.map((p) => p.hover).filter(Boolean));
   for (const b of beads) {
     const show = b.state !== 'gone';
-    b.shadow.visible = b.caustic.visible = show && pileFade > 0.01;
+    b.shadow.visible = b.caustic.visible = show && pileFade > 0.01 && b.state !== 'stuck';
     if (!show) continue;
 
     // proximity glow: lights up when a fingertip is at the stone's depth and close
@@ -923,7 +970,7 @@ function updateVisuals(dt) {
     const u = b.mat.uniforms;
     u.uHover.value = b.hover;
     u.uLensR.value = b.r / (2 * tanHalf * (camera.position.z - b.pos.z));
-    u.uDof.value = isHeld(b) ? 0 : Math.pow(clamp(Math.abs(b.pos.z - focusZ) / DOF_RANGE, 0, 1), 1.2) * 0.9;
+    u.uDof.value = isHeld(b) ? 0 : Math.pow(clamp(Math.abs(b.pos.z - focusZ) / DOF_RANGE, 0, 1), 1.2) * (b.state === 'stuck' ? 0.35 : 0.9);
     u.uHaze.value = clamp((-b.pos.z - 1.5) / 9, 0, 0.45);
 
     // slime: hand the deformation to the vertex shader in the stone's own frame
@@ -1202,10 +1249,14 @@ function frame(now) {
   }
 
   for (const p of pointers) updatePointer(p, dt, now);
+  const carrier = pointers.find((p) => p.held && p.wallMag > 0.02);
+  wall.setActive(carrier ? carrier.wallMag : 0);
+  wall.showTarget(carrier && carrier.wallSlot, carrier && carrier.held, carrier ? carrier.wallMag : 0);
   physics(dt);
   updateVisuals(dt);
   renderer.render(scene, camera);
   drawOverlay();
+  wall.updateLabels(camera, W, H);
   updateStats(now);
   requestAnimationFrame(frame);
 }
@@ -1213,7 +1264,12 @@ function frame(now) {
 resize();
 // pour the stones in and let physics settle them before anyone sees a frame,
 // so the page opens on a pile that gravity made
-beads.forEach((b) => pour(b, b.homeOrder));
+const savedWall = wall.savedLayout();
+beads.forEach((b) => {
+  const s = savedWall[b.id];
+  if (s) stick(b, wall.slot(b, s.x, wall.rowY(s.row), stuck()));
+  else pour(b, b.homeOrder);
+});
 for (let k = 0; k < 420; k++) physics(1 / 60);
 requestAnimationFrame(frame);
 

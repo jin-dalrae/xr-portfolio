@@ -1,8 +1,8 @@
 # Glass Beads — Spatial Study 01
 
-A hand-tracked spatial interaction study for the browser. Your webcam becomes the room, and a glass bowl of stones is held out in front of you. Push the stones with an open hand, pick one up with a pinch or a fist, pull one apart with both hands to make it bigger, and let go mid-swing to throw it.
+A hand-tracked spatial interaction study for the browser. Your webcam becomes the room, a pile of glass stones rests in a shallow bowl in front of you, and a glass board floats to the side for sorting them. Push the stones with an open hand, pick one up with a pinch or a fist, pull one apart with both hands to make it bigger, and let go mid-swing to throw it.
 
-The stones are meant to feel physical rather than generated: they're poured in and settle under gravity, they stack, they keep their size and depth when you pick them up, and nothing ever pops in or vanishes. A thrown stone stays in the room, bouncing off its edges and landing on the table, until you put it back.
+The stones are meant to feel physical rather than generated: they're poured in and settle under gravity, they stack, they keep their size and depth when you pick them up, and nothing ever pops in or vanishes. A thrown stone stays in the room, bouncing off its edges, until you put it back.
 
 **Live demo:** https://jin-dalrae.github.io/xr-portfolio/
 
@@ -19,16 +19,20 @@ Best on a desktop or laptop with a webcam, in Chrome, Safari, Arc or Edge. Every
 | **Release mid-swing** | Throw. Stones bounce off the edges of the room and land in the bowl or on the table. |
 | **Move hand toward / away from camera** | Changes depth. The depth of field follows your hand, so the stones you can reach are the sharp ones. A held stone keeps its own depth and moves only as much as your hand does. |
 | **Move hand up / down over the bowl** | Like a table seen in perspective, lower on screen is nearer and higher is farther back in the bowl. |
+| **Carry a stone over the wall** | It's drawn magnetically onto the glass board, with a ring showing where it will land. Let go and it sticks in that row, sliding over so it doesn't overlap its neighbors. A fast flick still throws it. |
+| **Pinch or grab a stone on the wall** | Pulls it back off. |
 
-Toolbar (top, so the lower half stays clear for your hands): **Pile** (gravity, stones in the bowl) · **Float** (zero-g) · **Reset** (pours everything back into the bowl). Keys: `R` reset, `G` toggle gravity, `D` camera & depth panel. There are no on-screen instructions; the interaction is meant to be discovered by reaching in.
+**The wall** is a frosted glass board angled toward you on the right, with three category rows (**Warm**, **Cool**, **Clear** by default; click a label to rename it). Stones on it are solid, so loose stones bounce off them, and hands brushing past don't knock them off. The arrangement and labels are saved in the browser, so your board is still there next time.
+
+Toolbar (top, so the lower half stays clear for your hands): **Pile** (gravity, stones in the bowl) · **Float** (zero-g) · **Reset** (clears the wall and pours everything back into the bowl; row names are kept). Keys: `R` reset, `G` toggle gravity, `D` camera & depth panel. There are no on-screen instructions; the interaction is meant to be discovered by reaching in.
 
 **Mouse fallback:** drag to grab and throw, scroll while holding to change depth, shift + scroll to resize.
 
 ## How it works
 
 - **Glass:** [three.js](https://threejs.org) with hand-written GLSL. The camera feed is the background, and each stone transmits the same feed: bent gently (magnified, never flipped) and slightly softened, so the inside reads as calm light rather than a moving picture. Color is absorbed Beer–Lambert style (thick centers deeper, thin rims nearly clear), with a faint rainbow sheen on the rim, a caustic glow, and per-stone depth of field and haze.
-- **Textures:** each stone has a static texture carved in its own space, so it only moves when the stone turns: clear, frosted (sea glass, rose quartz, moonstone), fluted ribs, seeded (tiny air bubbles at two depths inside), ribbon (a cat's-eye band of color) and hammered dimples.
-- **Bowl:** a round glass bowl tipped about 26° toward the viewer, with a glass rim that refracts the room like the stones do. Stones are poured in on load and the physics settles them before the first frame, so the page opens on a pile gravity made.
+- **Textures:** surfaces stay smooth; each stone has a static look inside the glass, fixed in its own space so it only moves when the stone turns: clear, frosted (sea glass, rose quartz, moonstone), seeded (tiny air bubbles at two depths) and ribbon (a cat's-eye band of color).
+- **Bowl:** a wide, shallow bowl whose sides curve up so the pile gathers in front of you (its grid shows in mouse mode only). Stones are poured in on load and the physics settles them before the first frame, so the page opens on a pile gravity made.
 - **Slime:** a squash-and-stretch spring and a fingertip dent are applied in the vertex shader (normals included, so the dimple catches the light). Impacts, carrying, squeezing and two-hand stretching drive the springs.
 - **Hand tracking:** [MediaPipe Hand Landmarker](https://ai.google.dev/edge/mediapipe/solutions/vision/hand_landmarker) (21 landmarks per hand, up to 2 hands, GPU). Pinch and fist are measured on MediaPipe's metric 3D hand, so they hold up as the hand rotates.
 - **Depth sensing:** a webcam has no depth sensor, so depth is reconstructed three ways (switch live with `D`):
@@ -61,7 +65,9 @@ Constants at the top of [`src/main.js`](src/main.js):
 - `THROW_BOOST`, `FLICK_SPEED`, `HOLD_FOLLOW`: how throws and carrying feel.
 - `GRAVITY`, `TRAY_GRIP`, `RESTITUTION`: how heavy the stones feel.
 - `TRAY_DEPTH`, `PILE_LIFT`: how much screen height drives depth over the bowl.
-- In [`src/floor.js`](src/floor.js): `TRAY_TILT`, `TRAY_RADIUS`, `BOWL_K` for the bowl's angle, size and depth.
+- `WALL_THROW`: released over the wall slower than this, a stone sticks.
+- In [`src/floor.js`](src/floor.js): `FLOOR_Y`, `BOWL_X`, `BOWL_Z` for the bowl's height and curvature.
+- In [`src/wall.js`](src/wall.js): `WALL_ROWS`, `DEFAULT_LABELS`, `WALL_Z`, `WALL_YAW` for the board's categories and placement.
 - `SQUISH_SPEED`, `MAX_DENT`, `JELLY_K` / `JELLY_C`: how soft the slime is.
 
 ## Files
@@ -72,6 +78,7 @@ style.css      visionOS-style glass panels
 src/main.js    scene, physics, gestures, interaction
 src/glass.js   stone palette, geometry, glass shader
 src/floor.js   the bowl: shape, collisions, ray hits, contact shadows, caustics
+src/wall.js    the glass board: category rows, sticking slots, labels, saved layout
 src/room.js    room light probe, hand occlusion mask
 src/hands.js   MediaPipe setup, gestures, hand pose + face distance solvers
 ```

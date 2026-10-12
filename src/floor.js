@@ -1,58 +1,31 @@
 import * as THREE from 'three';
 
-// A round glass bowl, tipped toward the viewer so you see into it, like a dish being
-// shown off. Its sides curve up, so the stones settle into it and never roll out.
-export const TRAY_TILT = 0.45;                          // radians (~26°) toward the viewer
-export const TRAY_RADIUS = 3.2;
-export const RIM_TUBE = 0.17;                           // rim thickness (radius of its glass tube)
-const BOWL_K = 0.15;                                    // curvature: height = k · r²
-const TRAY_CENTER = new THREE.Vector3(0, -2.7, -3);
+// A shallow glass bowl: a wide, gently curved floor so the pile gathers in front of you.
+export const FLOOR_Y = -2.7;
+const BOWL_X = 0.03, BOWL_Z = 0.05, BOWL_ZC = -1;
+export const TRAY_RADIUS = 3.2;   // area the stones are poured over
+export const RIM_TUBE = 0;
 
-const trayQ = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), TRAY_TILT);
-const trayQInv = trayQ.clone().invert();
-const local = new THREE.Vector3(), tmp = new THREE.Vector3(), nl = new THREE.Vector3();
+const floorHeight = (x, z) => FLOOR_Y + BOWL_X * x * x + BOWL_Z * (z - BOWL_ZC) ** 2;
+const floorNormal = (x, z, out) => out.set(-2 * BOWL_X * x, 1, -2 * BOWL_Z * (z - BOWL_ZC)).normalize();
 
-const toLocal = (p) => local.copy(p).sub(TRAY_CENTER).applyQuaternion(trayQInv);
-const toWorld = (v, out) => out.copy(v).applyQuaternion(trayQ).add(TRAY_CENTER);
-// bowl inside the rim; a flat ledge at rim height outside it
-const bowlH = (x, z) => BOWL_K * Math.min(x * x + z * z, TRAY_RADIUS * TRAY_RADIUS);
-const RIM_H = BOWL_K * TRAY_RADIUS * TRAY_RADIUS;
-
-// Point on the bowl under p (world) and its normal; returns p's distance above it.
+// Point on the bowl under p and its normal; returns p's distance above it.
 export function trayProbe(p, outPoint, outNormal) {
-  toLocal(p);
-  const inside = local.x * local.x + local.z * local.z < TRAY_RADIUS * TRAY_RADIUS;
-  const h = bowlH(local.x, local.z);
-  nl.set(inside ? -2 * BOWL_K * local.x : 0, 1, inside ? -2 * BOWL_K * local.z : 0).normalize();
-  outNormal.copy(nl).applyQuaternion(trayQ);
-  toWorld(tmp.set(local.x, h, local.z), outPoint);
-  return (local.y - h) * nl.y;
+  const h = floorHeight(p.x, p.z);
+  floorNormal(p.x, p.z, outNormal);
+  outPoint.set(p.x, h, p.z);
+  return (p.y - h) * outNormal.y;
 }
 
 // Contact with the bowl. Returns penetration (> 0 = overlapping, ~0 = resting), writes the normal.
+const tp = new THREE.Vector3();
 export function trayPlane(p, r, outNormal) {
-  toLocal(p);
-  if (Math.hypot(local.x, local.z) > TRAY_RADIUS) return -Infinity; // outside the bowl
-  const h = bowlH(local.x, local.z);
-  nl.set(-2 * BOWL_K * local.x, 1, -2 * BOWL_K * local.z).normalize();
-  const d = (local.y - h) * nl.y;
-  if (d < -2 * r) return -Infinity; // underneath
-  outNormal.copy(nl).applyQuaternion(trayQ);
-  return r - d;
+  const d = trayProbe(p, tp, outNormal);
+  return d < -2 * r ? -Infinity : r - d;
 }
 
-// Contact with the rim: a ring of glass tube around the top edge of the bowl.
-export function trayRim(p, r, outNormal) {
-  toLocal(p);
-  const rho = Math.hypot(local.x, local.z) || 1e-6;
-  tmp.set((local.x / rho) * TRAY_RADIUS, RIM_H + RIM_TUBE, (local.z / rho) * TRAY_RADIUS);
-  tmp.subVectors(local, tmp);
-  const d = tmp.length();
-  const pen = r + RIM_TUBE - d;
-  if (pen <= 0) return 0;
-  outNormal.copy(tmp).divideScalar(d || 1).applyQuaternion(trayQ);
-  return pen;
-}
+// The bowl has no separate rim; its sides curve up.
+export const trayRim = () => 0;
 
 // Where does a ray from the camera land in the bowl? Marches, then bisects.
 const rp = new THREE.Vector3(), rpt = new THREE.Vector3(), rn = new THREE.Vector3();
@@ -71,61 +44,46 @@ export function rayTray(origin, dir, out, maxT = 40) {
   return null;
 }
 
-// Bowl-local (x, z) -> world point on its surface.
-export const trayAt = (x, z, out) => toWorld(tmp.set(x, bowlH(x, z), z), out);
+// Bowl-centered (x, z) -> world point on its surface.
+export const trayAt = (x, z, out) => out.set(x, floorHeight(x, z + BOWL_ZC), z + BOWL_ZC);
 
-// The bowl itself: faint glass with a sheen, and a real glass rim
-// (same shader as the stones, so it refracts the room too).
-export function makeFloor(rimMaterial) {
-  const group = new THREE.Group();
-  group.position.copy(TRAY_CENTER);
-  group.quaternion.copy(trayQ);
+export function makeFloor() {
+  const geo = new THREE.PlaneGeometry(36, 24, 96, 64);
+  geo.rotateX(-Math.PI / 2);
+  geo.translate(0, 0, -2);
+  const pos = geo.attributes.position;
+  for (let i = 0; i < pos.count; i++) pos.setY(i, floorHeight(pos.getX(i), pos.getZ(i)));
 
-  const discMat = new THREE.ShaderMaterial({
+  const mat = new THREE.ShaderMaterial({
     uniforms: { uOpacity: { value: 1 } },
     transparent: true,
     depthWrite: false,
     vertexShader: /* glsl */ `
-      varying vec2 vL;
+      varying vec3 vW;
       void main() {
-        vL = position.xz;
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        vec4 w = modelMatrix * vec4(position, 1.0);
+        vW = w.xyz;
+        gl_Position = projectionMatrix * viewMatrix * w;
       }
     `,
     fragmentShader: /* glsl */ `
       uniform float uOpacity;
-      varying vec2 vL;
+      varying vec3 vW;
       void main() {
-        float r = length(vL) / ${TRAY_RADIUS.toFixed(2)};
-        float fill = 0.05 + 0.05 * smoothstep(0.2, 1.0, r);        // glass reads thicker toward the edge
-        float sheen = 0.07 * smoothstep(0.6, 0.0, abs(vL.x * 0.18 + vL.y * 0.12 - 0.15)); // a soft diagonal reflection
-        float edge = smoothstep(0.93, 0.995, r) * 0.25;
-        float a = (fill + sheen + edge) * (1.0 - smoothstep(0.995, 1.0, r)) * uOpacity;
-        gl_FragColor = vec4(vec3(0.88, 0.93, 1.0), a);
+        vec2 g = abs(fract(vW.xz * 1.0) - 0.5) / fwidth(vW.xz);
+        float line = 1.0 - min(min(g.x, g.y), 1.0);
+        float fade = smoothstep(-9.0, -3.0, vW.z) * smoothstep(3.4, 1.2, vW.z)
+                   * (1.0 - smoothstep(4.0, 9.0, abs(vW.x)));
+        float a = (0.05 + line * 0.16) * fade * uOpacity;
+        gl_FragColor = vec4(vec3(0.85, 0.92, 1.0), a);
         #include <colorspace_fragment>
       }
     `,
   });
-  const discGeo = new THREE.CircleGeometry(TRAY_RADIUS, 128, 0, Math.PI * 2).rotateX(-Math.PI / 2);
-  // CircleGeometry has one ring; rebuild with rings so the bowl can curve
-  const bowlGeo = new THREE.RingGeometry(0.001, TRAY_RADIUS, 128, 24).rotateX(-Math.PI / 2);
-  const bp = bowlGeo.attributes.position;
-  for (let i = 0; i < bp.count; i++) bp.setY(i, bowlH(bp.getX(i), bp.getZ(i)));
-  bowlGeo.computeVertexNormals();
-  discGeo.dispose();
-  const disc = new THREE.Mesh(bowlGeo, discMat);
-  disc.renderOrder = -0.5;
-
-  const rim = new THREE.Mesh(new THREE.TorusGeometry(TRAY_RADIUS, RIM_TUBE, 24, 192).rotateX(Math.PI / 2), rimMaterial);
-  rim.position.y = RIM_H + RIM_TUBE;
-
-  group.add(disc, rim);
-  group.userData.setOpacity = (o) => {
-    discMat.uniforms.uOpacity.value = o;
-    rim.visible = o > 0.05;
-  };
-  group.userData.rim = rim;
-  return group;
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.renderOrder = -0.5;
+  mesh.userData.setOpacity = (o) => { mat.uniforms.uOpacity.value = o; };
+  return mesh;
 }
 
 function radialTexture(stops) {

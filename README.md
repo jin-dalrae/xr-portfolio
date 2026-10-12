@@ -17,14 +17,14 @@ Best on a desktop or laptop with a webcam, in Chrome, Safari, Arc or Edge. Every
 | **Fist** | Grab with your whole hand. Squeeze tighter to squish it. |
 | **Both hands on one stone** | Pull apart to grow it (up to 3.2×), push together to shrink it. |
 | **Release mid-swing** | Throw. Stones bounce off the edges of the room and land in the bowl or on the table. |
-| **Move hand toward / away from camera** | Changes depth. The depth of field follows your hand, so the stones you can reach are the sharp ones. A held stone keeps its own depth and moves only as much as your hand does. |
+| **Move hand toward / away from camera** | Changes depth. The depth of field follows your hand, so the stones you can reach are the sharp ones. A held stone keeps its own depth and moves twice as far as your hand does, so you can pull it right up to the screen or push it to the back. |
 | **Move hand up / down over the bowl** | Like a table seen in perspective, lower on screen is nearer and higher is farther back in the bowl. |
 | **Carry a stone over the wall** | It's drawn magnetically onto the glass board, with a ring showing where it will land. Let go and it sticks in that row, sliding over so it doesn't overlap its neighbors. A fast flick still throws it. |
 | **Pinch or grab a stone on the wall** | Pulls it back off. |
 
 **The wall** is a frosted glass board angled toward you on the right, with three category rows (**Warm**, **Cool**, **Clear** by default; click a label to rename it). Stones on it are solid, so loose stones bounce off them, and hands brushing past don't knock them off. The arrangement and labels are saved in the browser, so your board is still there next time.
 
-Toolbar (top, so the lower half stays clear for your hands): **Pile** (gravity, stones in the bowl) · **Float** (zero-g) · **Reset** (clears the wall and pours everything back into the bowl; row names are kept). Keys: `R` reset, `G` toggle gravity, `D` camera & depth panel. There are no on-screen instructions; the interaction is meant to be discovered by reaching in.
+Toolbar (top, so the lower half stays clear for your hands): **Pile** (gravity, stones in the bowl) · **Float** (zero-g) · **Reset** (clears the wall and pours everything back into the bowl; row names are kept). Keys: `R` reset, `G` toggle gravity, `D` camera & depth panel. There are no on-screen instructions and no cursor on your hand: your real hand is the pointer, and stones glow softly when they're within reach. The interaction is meant to be discovered by reaching in.
 
 **Mouse fallback:** drag to grab and throw, scroll while holding to change depth, shift + scroll to resize.
 
@@ -43,7 +43,7 @@ Toolbar (top, so the lower half stays clear for your hands): **Pile** (gravity, 
   Every joint gets its own metric depth, so a finger pointing at the screen reaches deeper than the palm behind it.
 - **Screen height as depth:** over the bowl, a ray from the camera through your palm lands somewhere in the bowl, and that depth is blended with the measured one (up to 65%, strongest low on the screen). It's steadier than distance-from-camera alone. While you hold a stone the blend is frozen, so lifting it doesn't push it deeper.
 - **Matching the real room:** the camera feed stays ungraded (decoded to linear light, with automatic black-level and exposure correction for bright rooms that make webcams run hot and hazy). A 64×36 probe of each frame finds the room's average color and its brightest light; the glass keeps the same crisp studio lighting as the dark backdrop, tinted by that light, with a soft reflection of the room on top. Over a bright room the glass gets a little extra depth and a darker inner edge, so it reads as glass rather than a flat sticker. Everything renders at full screen resolution. Real hands occlude the glass via a soft depth mask drawn from the hand skeleton, and stones cast shadows onto the hand beneath them.
-- **Physics:** a small custom solver tuned for heavy glass: strong gravity, low bounce, Coulomb friction in the bowl so stones settle and stay where they settle, sphere–sphere impulses with resting-contact handling, and screen-edge walls plus an invisible table so nothing leaves the room. Hands are kinematic colliders with swept tests so fast swipes don't tunnel; held stones trail the hand slightly for weight; throw velocity comes from the peak of recent tracked hand motion, so a throw still lands even if the camera loses your hand to motion blur.
+- **Physics:** a small custom solver tuned for heavy but lively glass: strong gravity, with real bounce, clink and wobble on contact, and friction in the bowl so stones roll a little and then settle, sphere–sphere impulses with resting-contact handling, and screen-edge walls plus an invisible table so nothing leaves the room. Hands are kinematic colliders with swept tests so fast swipes don't tunnel; held stones trail the hand slightly for weight; throw velocity comes from the peak of recent tracked hand motion, so a throw still lands even if the camera loses your hand to motion blur.
 
 ## Run locally
 
@@ -63,7 +63,8 @@ Constants at the top of [`src/main.js`](src/main.js):
 - `HAND_NEAR` / `HAND_FAR`: palm method only.
 - `PINCH_ON` / `PINCH_OFF`, `FIST_ON` / `FIST_OFF`: gesture thresholds (with hysteresis).
 - `THROW_BOOST`, `FLICK_SPEED`, `HOLD_FOLLOW`: how throws and carrying feel.
-- `GRAVITY`, `TRAY_GRIP`, `RESTITUTION`: how heavy the stones feel.
+- `GRAVITY`, `TRAY_GRIP`, `RESTITUTION`, `JELLY_K` / `JELLY_C`, `SPIN`: how heavy and how lively the stones feel.
+- `HOLD_DEPTH_GAIN`, `HAND_Z_FRONT` / `HAND_Z_BACK`, `Z_MAX`: how far your reach carries in depth.
 - `TRAY_DEPTH`, `PILE_LIFT`: how much screen height drives depth over the bowl.
 - `WALL_THROW`: released over the wall slower than this, a stone sticks.
 - In [`src/floor.js`](src/floor.js): `FLOOR_Y`, `BOWL_X`, `BOWL_Z`, `TILT` for the bowl's height, curvature and tip toward the viewer.

@@ -12,7 +12,9 @@ import {
 const PINCH_ON = 0.3, PINCH_OFF = 0.44;   // thumb–index ratio: grab / let go
 const FIST_ON = 1.25, FIST_OFF = 1.45;    // finger curl: close / open
 const PICK_SLACK_PX = 36;                 // forgiveness around a stone's silhouette
-const Z_MIN = -7, Z_MAX = 3;              // depth of the room (camera sits at z = 10)
+const Z_MIN = -8, Z_MAX = 6;              // depth of the room (camera sits at z = 10); held stones can come this close
+const HAND_Z_FRONT = 3.2, HAND_Z_BACK = -6.5; // where the hand's reach maps to in the room
+const HOLD_DEPTH_GAIN = 2;                // a held stone moves this many times your hand's motion toward/away
 
 // Hand depth. Three methods, switchable live in the depth panel (press D):
 //   mirror: hand distance / face distance. The screen is a mirror; a hand at your face
@@ -21,8 +23,8 @@ const Z_MIN = -7, Z_MAX = 3;              // depth of the room (camera sits at z
 //   metric: hand distance in meters (3D hand pose fit), mapped onto a self-calibrating
 //           range of your reach.
 //   palm:   apparent palm size only (the original heuristic).
-const MIRROR_NEAR = 0.3;                  // hand/face distance ratio at the front of the room
-const MIRROR_FAR = 0.95;                  // ... and at the back (hand level with your face)
+const MIRROR_NEAR = 0.4;                  // hand/face distance ratio at the front of the room
+const MIRROR_FAR = 0.9;                   // ... and at the back (hand level with your face)
 const HAND_NEAR = 0.36, HAND_FAR = 0.12;  // palm method: palm / video height, near & far
 const LM_Z_GAIN = 1.0;                    // palm method: trust in MediaPipe's per-joint z
 // Screen height as depth: over the tilted tray (lower half of the screen), where the
@@ -32,9 +34,9 @@ const TRAY_DEPTH = 0.65;                  // max share of hand depth taken from 
 const PILE_LIFT = 0.7;                    // hover this far above the tray surface (toward camera)
 
 const TIP_RADIUS = 0.2, PALM_RADIUS = 0.42;
-const TOUCH_BOUNCE = 0.15;                // restitution for fast hand hits
-const TOUCH_STRENGTH = 0.45;              // share of the hand's speed passed to a stone
-const TOUCH_MAX_SPEED = 7;                // cap on how fast a hit can send a stone
+const TOUCH_BOUNCE = 0.3;                 // restitution for fast hand hits
+const TOUCH_STRENGTH = 0.6;               // share of the hand's speed passed to a stone
+const TOUCH_MAX_SPEED = 9;                // cap on how fast a hit can send a stone
 const HAND_STILL = 0.9;                   // hand speeds below this are tracking jitter, not motion
 const SQUISH_SPEED = 2.5;                 // slower than this, a fingertip dents instead of batting
 const MAX_DENT = 0.35;                    // fraction of radius a stone can be dented
@@ -44,19 +46,19 @@ const GRAVITY = 22;                       // heavy glass: falls and settles fast
 const FLOAT_DRAG = 0.8, PILE_DRAG = 0.25;
 const TABLE_Y = -3.6;                     // invisible table under the bowl (pile mode)
 const PILE_FRONT_Z = 1.0;                 // keeps stones on the table in view
-const RESTITUTION = 0.35, FLOOR_BOUNCE = 0.15;
-const TRAY_GRIP = 0.9;                    // friction in the bowl: stones settle, then stay where they settle
-const THROW_BOOST = 0.85;                 // heavy stones leave the hand a little slower
+const RESTITUTION = 0.5, FLOOR_BOUNCE = 0.3;   // glass clinks: lively, but gravity keeps it heavy
+const TRAY_GRIP = 0.55;                   // friction in the bowl: stones roll a little, then settle
+const THROW_BOOST = 1.0;
 const FLICK_SPEED = 16;                   // fast hand + loosening grip = release now
 const MAX_THROW = 30;
 const WALL_THROW = 9;                     // released over the wall slower than this: it sticks
-const SPIN = 0.25;                        // overall spin multiplier (throws, hits, collisions)
+const SPIN = 0.4;                         // overall spin multiplier (throws, hits, collisions)
 const MAX_SPIN = 2.5;                     // rad/s cap
-const SPIN_DAMP = 1.2;                    // how quickly spin settles
+const SPIN_DAMP = 0.8;                    // how quickly spin settles
 const HOLD_FOLLOW = 13;                   // how tightly a held stone follows the hand (lower = heavier lag)
 const MIN_SIZE = 0.35, MAX_SIZE = 3.2;    // two-hand stretch limits
 const DOF_RANGE = 4.5;                    // depth distance at which a stone is fully defocused
-const JELLY_K = 120, JELLY_C = 9;         // slime spring: stiffness / damping (heavier = slower, calmer)
+const JELLY_K = 150, JELLY_C = 6;         // slime spring: stiffness / damping
 
 // ---------- DOM ----------
 const canvas = document.getElementById('gl');
@@ -285,7 +287,7 @@ function makePointer(kind) {
     gx: 0, gy: 0, gz: null,        // active grab point
     pinch: false, fist: false, wasGrip: false,
     pinchAmt: 0, ratio: 1, curl: 2, squeeze: 0,
-    palmR: 0, handZ: 0, pinchZ: 0, zOffset: 0,
+    palmR: 0, handZ: 0, pinchZ: 0, grabGz: 0,
     held: null, gripMode: 'pinch', grabZ: 0, depthSm: 0, wheelZ: 0,
     wallSlot: null, wallMag: 0,
     target: new THREE.Vector3(), raw: new THREE.Vector3(),
@@ -351,7 +353,7 @@ function grab(p, b, mode) {
   p.held = b;
   p.gripMode = mode;
   p.grabZ = b.pos.z; p.depthSm = b.pos.z; p.wheelZ = 0;
-  p.zOffset = p.gz == null ? 0 : b.pos.z - p.gz;   // the stone keeps its own depth; only hand motion moves it
+  p.grabGz = p.gz;   // the stone keeps its own depth; only hand motion (amplified) moves it
   p.history.length = 0;
   screenToWorld(p.gx, p.gy, b.pos.z, p.raw);
   p.target.copy(p.raw);
@@ -441,7 +443,7 @@ function updatePointer(p, dt, now) {
     const b = p.held;
     let z;
     if (p.kind === 'hand') {
-      z = p.gz + p.zOffset;
+      z = p.grabZ + (p.gz - p.grabGz) * HOLD_DEPTH_GAIN;
     } else {
       z = p.grabZ + p.wheelZ;
     }
@@ -522,7 +524,7 @@ const trayHit = new THREE.Vector3();
 let lastFaceTime = -1, faceFrame = 0;
 
 // 0 = front of the room (near the screen), 1 = back
-const zFromT = (t) => THREE.MathUtils.lerp(Z_MAX - 0.3, Z_MIN + 0.5, clamp(t, 0, 1));
+const zFromT = (t) => THREE.MathUtils.lerp(HAND_Z_FRONT, HAND_Z_BACK, clamp(t, 0, 1));
 const faceFresh = (now) => depth.faceDist > 0 && now - depth.faceSeen < 1500;
 
 // palm ratio -> world z, linear in apparent distance (1 / size)
@@ -691,9 +693,9 @@ let time = 0;
 const handIsTouching = (p) => p.visible && !p.held && !p.fist && p.pinchAmt < 0.45;
 
 function jellyKick(b, normal, speed) {
-  if (speed < 2) return;
+  if (speed < 1.2) return;
   b.jAxis.copy(normal);
-  b.jv -= Math.min(speed * 0.06, 1.0) / Math.sqrt(b.sizeMul);
+  b.jv -= Math.min(speed * 0.09, 1.4) / Math.sqrt(b.sizeMul);
 }
 
 function handTouches() {
@@ -795,8 +797,12 @@ function bounds(dt) {
     if (b.pos.y > hh - b.r) { b.pos.y = hh - b.r; if (b.vel.y > 0) b.vel.y *= -RESTITUTION; }
     if (!gravityOn && b.pos.y < -hh + b.r) { b.pos.y = -hh + b.r; if (b.vel.y < 0) b.vel.y *= -RESTITUTION; }
     if (b.pos.z < Z_MIN + b.r) { b.pos.z = Z_MIN + b.r; if (b.vel.z < 0) b.vel.z *= -RESTITUTION; }
-    const front = gravityOn ? PILE_FRONT_Z : Z_MAX;
-    if (b.pos.z > front - b.r) { b.pos.z = front - b.r; if (b.vel.z > 0) b.vel.z *= -RESTITUTION; }
+    if (b.pos.z > Z_MAX - b.r) { b.pos.z = Z_MAX - b.r; if (b.vel.z > 0) b.vel.z *= -RESTITUTION; }
+    // pile mode: a stone let go up close glides back toward the bowl instead of jumping
+    if (gravityOn && b.pos.z > PILE_FRONT_Z - b.r) {
+      b.vel.z -= (b.pos.z - (PILE_FRONT_Z - b.r)) * 6 * dt;
+      b.vel.z *= Math.exp(-dt * 2);
+    }
 
     if (gravityOn) {
       // a table under the bowl catches anything that falls out of it
@@ -904,7 +910,7 @@ function physics(dt) {
     // rolling on the tray
     if (b.onFloor && !isHeld(b)) {
       const rolling = b.vel.lengthSq() > 0.25;
-      b.angVel.lerp(rolling ? axis.crossVectors(b.floorN, b.vel).multiplyScalar(0.5 / b.r) : axis.set(0, 0, 0), 1 - Math.exp(-dt * 4));
+      b.angVel.lerp(rolling ? axis.crossVectors(b.floorN, b.vel).multiplyScalar(0.85 / b.r) : axis.set(0, 0, 0), 1 - Math.exp(-dt * 4));
       if (b.vel.lengthSq() < 0.04) b.vel.multiplyScalar(0.5); // settle
     }
     if (!isHeld(b)) b.angVel.multiplyScalar(Math.exp(-dt * SPIN_DAMP));
@@ -1001,7 +1007,7 @@ function updateVisuals(dt) {
   // fingertip orbs live in 3D, so stones in front of your hand occlude them
   for (const p of handPtrs) {
     p.orbs.forEach((o, k) => {
-      o.visible = p.visible;
+      o.visible = p.visible && panelOpen;  // the real hand is the cursor; orbs only for debugging
       if (!p.visible) return;
       o.position.copy(p.colliders[k].pos);
       const isPinchFinger = TIP_IDS[k] === THUMB_TIP || TIP_IDS[k] === INDEX_TIP;
@@ -1102,8 +1108,7 @@ function drawOverlay() {
     }
 
     // focus ring at the grab point, only when it means something; its size follows depth
-    const engaged = p.hover || p.held || p.pinchAmt > 0.35 || p.fist;
-    if (!engaged && !panelOpen) { ctx.restore(); continue; }
+    if (!panelOpen) { ctx.restore(); continue; }  // no cursor ring: stones glow when they're reachable
     const base = fistMode ? 34 : 22 - 11 * amt;
     const r = base * clamp(persp, 0.55, 1.6);
     ctx.strokeStyle = p.hover || p.held ? 'rgba(255,255,255,0.95)' : 'rgba(255,255,255,0.5)';

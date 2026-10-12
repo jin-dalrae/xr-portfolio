@@ -45,7 +45,7 @@ const TOUCH_GLOW_DIST = 0.8;              // stones glow when a fingertip is thi
 const GRAVITY = 22;                       // heavy glass: falls and settles fast
 const FLOAT_DRAG = 0.8, PILE_DRAG = 0.25;
 const TABLE_Y = -4.3;                     // invisible table under the bowl (pile mode)
-const PILE_FRONT_Z = 1.0;                 // keeps stones on the table in view
+const PILE_FRONT_Z = 2.0;                 // stones resting farther forward than this glide back
 const RESTITUTION = 0.5, FLOOR_BOUNCE = 0.3;   // glass clinks: lively, but gravity keeps it heavy
 const TRAY_GRIP = 0.55;                   // friction in the bowl: stones roll a little, then settle
 const THROW_BOOST = 1.0;
@@ -163,7 +163,7 @@ function setMode(mode) {
 }
 
 // ---------- stones ----------
-const ALL_STONES = [...STONES, ...makeSmallStones(14)];
+const ALL_STONES = [...STONES, ...makeSmallStones(30)];
 
 const beads = ALL_STONES.map((stone, i) => {
   const geo = makeStoneGeometry(stone.kind, i + 1, stone.small ? 14 : 24);
@@ -236,7 +236,7 @@ function pour(b, k) {
   b.spawnT = 1;
   // from just above its own spot (spots don't overlap), in three staggered layers;
   // they drop into the bowl, roll to the bottom and stack
-  trayAt(b.home.x, b.home.z, b.pos).y += b.r + 0.15 + (k % 3) * 0.35;
+  trayAt(b.home.x, b.home.z, b.pos).y += b.r + 0.15 + (k % 3) * 1.1;
 }
 
 // ---------- the wall: stones stick to it in category rows, and can be pulled off ----------

@@ -2,11 +2,11 @@ import * as THREE from 'three';
 
 // A shallow glass bowl: a wide, gently curved floor so the pile gathers in front of you.
 // TILT raises the back, tipping the bowl toward the viewer so the pile faces the camera.
-export const FLOOR_Y = -3.55;
-const BOWL_X = 0.03, BOWL_Z = 0.05, BOWL_ZC = -1.5;
+export const FLOOR_Y = -3.15;
+const BOWL_X = 0.02, BOWL_Z = 0.05, BOWL_ZC = -0.5;
 const TILT = 0.12;
 const LOW_Z = BOWL_ZC + TILT / (2 * BOWL_Z);   // where the bowl bottoms out (the pile's center)
-export const TRAY_RADIUS = 3.2;   // area the stones are poured over
+export const TRAY_RADIUS = 3.8;   // area the stones are poured over
 export const RIM_TUBE = 0;
 
 const floorHeight = (x, z) => FLOOR_Y + BOWL_X * x * x + BOWL_Z * (z - BOWL_ZC) ** 2 - TILT * (z - BOWL_ZC);
@@ -75,7 +75,7 @@ export function makeFloor() {
       void main() {
         vec2 g = abs(fract(vW.xz * 1.0) - 0.5) / fwidth(vW.xz);
         float line = 1.0 - min(min(g.x, g.y), 1.0);
-        float fade = smoothstep(-9.0, -3.0, vW.z) * smoothstep(3.4, 1.2, vW.z)
+        float fade = smoothstep(-8.0, -2.0, vW.z) * smoothstep(4.6, 2.4, vW.z)
                    * (1.0 - smoothstep(4.0, 9.0, abs(vW.x)));
         float a = (0.05 + line * 0.16) * fade * uOpacity;
         gl_FragColor = vec4(vec3(0.85, 0.92, 1.0), a);

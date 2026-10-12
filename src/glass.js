@@ -26,6 +26,16 @@ uniform vec2 uVideoScale;
 uniform vec2 uResolution;
 uniform float uTime;
 uniform float uAspect;
+uniform sampler2D uHandMask;   // a = hand coverage, g = how near the hand is (0 back .. 1 front)
+uniform vec2 uMaskZ;           // world z range the mask's g channel spans
+uniform float uExposure;       // camera exposure correction (linear multiplier)
+uniform float uBlack;          // camera black level to remove (haze from bright rooms)
+
+// Camera frames arrive sRGB-encoded; decode explicitly (three.js doesn't for video),
+// otherwise the gamma is applied twice and the room looks washed out.
+vec3 srgbToLinear(vec3 c) {
+  return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
+}
 
 vec3 fallbackBg(vec2 uv) {
   vec2 p = (uv - 0.5) * vec2(uAspect, 1.0);
@@ -44,7 +54,10 @@ vec3 sceneBg(vec2 uv) {
   if (uHasVideo > 0.5) {
     vec2 v = (uv - 0.5) * uVideoScale + 0.5;
     v.x = 1.0 - v.x; // mirror, like a selfie view
-    return texture2D(uVideo, clamp(v, vec2(0.001), vec2(0.999))).rgb;
+    vec3 c = srgbToLinear(texture2D(uVideo, clamp(v, vec2(0.001), vec2(0.999))).rgb);
+    c = max(c - uBlack, 0.0) / (1.0 - uBlack) * uExposure;  // set black back to black, then expose
+    // soft shoulder: bright windows roll off instead of clipping to flat white
+    return c * (1.0 + c / 2.25) / (1.0 + c);
   }
   return fallbackBg(uv);
 }
@@ -59,13 +72,32 @@ export function makeBackground(shared) {
       void main() { gl_Position = vec4(position.xy, 0.0, 1.0); }
     `,
     fragmentShader: BG_CHUNK + /* glsl */ `
+      uniform vec4 uShadows[8];  // xy = screen uv, z = radius (uv height), w = strength
+
       void main() {
         vec2 uv = gl_FragCoord.xy / uResolution;
         vec3 c = sceneBg(uv);
-        c *= 0.72;                                        // dim the room so glass pops
-        c = mix(c, c * vec3(0.92, 0.97, 1.06), 0.6);      // slight cool grade
         float vig = length((uv - 0.5) * vec2(uAspect, 1.0));
-        c *= mix(1.0, 0.45, smoothstep(0.35, 1.15, vig));
+        if (uHasVideo > 0.5) {
+          // the real room stays real: no grade, only the faintest lens falloff
+          c *= mix(1.0, 0.88, smoothstep(0.5, 1.2, vig));
+          // stones cast soft shadows onto the user's hands
+          float cover = texture2D(uHandMask, uv).a;
+          if (cover > 0.01) {
+            float sh = 0.0;
+            for (int i = 0; i < 8; i++) {
+              vec4 s = uShadows[i];
+              if (s.w <= 0.0) continue;
+              vec2 d = (uv - s.xy) * vec2(uAspect, 1.0);
+              sh = max(sh, s.w * exp(-dot(d, d) / (s.z * s.z)));
+            }
+            c *= 1.0 - 0.55 * sh * cover;
+          }
+        } else {
+          c *= 0.72;                                        // dim the backdrop so glass pops
+          c = mix(c, c * vec3(0.92, 0.97, 1.06), 0.6);      // slight cool grade
+          c *= mix(1.0, 0.45, smoothstep(0.35, 1.15, vig));
+        }
         gl_FragColor = vec4(c, 1.0);
         #include <colorspace_fragment>
       }
@@ -101,6 +133,7 @@ export function makeGlassMaterial(shared, stone) {
       varying vec3 vN;
       varying vec3 vV;
       varying vec3 vObj;
+      varying float vWorldZ;
       uniform vec3 uJAxis;     // jelly axis (object space)
       uniform float uJAmt;     // >0 stretch, <0 squash, volume-preserving
       uniform vec3 uDentDir;   // where a fingertip presses in (object space)
@@ -128,6 +161,7 @@ export function makeGlassMaterial(shared, stone) {
         vN = normalize(normalMatrix * nn);
         vV = -mv.xyz;
         vObj = position;
+        vWorldZ = (modelMatrix * vec4(p, 1.0)).z;
         gl_Position = projectionMatrix * mv;
       }
     `,
@@ -142,9 +176,17 @@ export function makeGlassMaterial(shared, stone) {
       uniform float uIor;
       uniform float uDof;   // 0 = in focus, 1 = fully out of focus
       uniform float uHaze;  // atmospheric fade for far stones
+      // lit by the real room (camera mode)
+      uniform vec3 uAmbient;     // average room color (linear)
+      uniform vec3 uKeyColor;    // hue of the brightest light
+      uniform vec3 uKeyDir;      // its direction (view space)
+      uniform float uKeyStrength;
+      uniform sampler2D uEnv;    // blurred room, for reflections
+      uniform float uGrain;
       varying vec3 vN;
       varying vec3 vV;
       varying vec3 vObj;
+      varying float vWorldZ;
 
       void main() {
         vec3 n = normalize(vN);
@@ -179,14 +221,21 @@ export function makeGlassMaterial(shared, stone) {
         }
 
         vec3 tint = uTint;
-        // Absorption: thicker center soaks up more color.
-        vec3 body = refr * mix(vec3(1.0), tint, uTintAmt);
-        body = mix(body, body * tint, uTintAmt * 0.55 * ndv);
-        body += tint * 0.05 * ndv;
+        float room = uHasVideo;  // 1 = match the real room, 0 = studio look
+        float ambLum = dot(uAmbient, vec3(0.2126, 0.7152, 0.0722));
+        vec3 ambTint = uAmbient / max(ambLum, 1e-3);
 
-        // Caustic: light focused through the stone pools on the lower side.
-        float caustic = pow(max(dot(n, normalize(vec3(-0.25, -0.75, 0.6))), 0.0), 5.0);
-        body += tint * caustic * 0.38;
+        // Absorption (Beer–Lambert): light through the thick center loses more of
+        // the colors the glass doesn't pass; the thin rim stays nearly clear.
+        float thick = mix(0.3, 1.0, ndv);
+        vec3 trans = pow(max(tint, vec3(0.02)), vec3(uTintAmt * 1.5 * thick));
+        vec3 body = refr * trans;
+        body += tint * 0.04 * ndv * (1.0 - room);
+
+        // Caustic: light focused through the stone pools on the side away from the light.
+        vec3 causticDir = normalize(mix(vec3(-0.25, -0.75, 0.6), vec3(-uKeyDir.xy, 0.6), room));
+        float caustic = pow(max(dot(n, causticDir), 0.0), 5.0);
+        body += tint * caustic * mix(0.38, 0.5 * clamp(ambLum * 2.5, 0.2, 1.0), room);
 
         // Darker band just inside the silhouette (total internal reflection).
         float band = smoothstep(0.35, 0.7, rim) * (1.0 - smoothstep(0.8, 0.98, rim));
@@ -195,6 +244,7 @@ export function makeGlassMaterial(shared, stone) {
         // Thin-film iridescence on the rim.
         vec3 irid = 0.5 + 0.5 * cos(6.28318 * (vec3(0.0, 0.33, 0.67) + fres * 1.4 + uIridShift + vObj.y * 0.2));
         vec3 rimCol = mix(vec3(1.0), irid, uIrid) * mix(vec3(1.0), tint, 0.3);
+        rimCol *= mix(vec3(1.0), ambTint * clamp(ambLum * 3.0, 0.45, 1.1), room);
 
         // Studio lighting in view space: softbox overhead + two sharp highlights.
         vec3 r = reflect(-v, n);
@@ -205,15 +255,34 @@ export function makeGlassMaterial(shared, stone) {
         float spec2 = pow(max(dot(r, normalize(vec3(-0.55, 0.35, 0.75))), 0.0), 40.0) * 0.22;
         float floorRef = smoothstep(-0.2, -0.8, r.y) * 0.07;
 
-        vec3 col = body;
-        col += rimCol * fres * 0.8;
-        col += vec3(softbox) * 0.22 * (0.35 + fres);
-        col += vec3(spec + spec2);
-        col += tint * floorRef;
-        col += uHover * (fres * 0.9 + 0.07) * mix(vec3(1.0), tint, 0.5);
+        vec3 studio = vec3(softbox) * 0.22 * (0.35 + fres) + vec3(spec + spec2) + tint * floorRef;
 
-        col = mix(col, sceneBg(suv) * 0.7 + tint * 0.03, uHaze);
+        // Room lighting: reflections are the room itself, the highlight sits where
+        // the room's brightest light is, in that light's color.
+        vec3 envC = srgbToLinear(texture2D(uEnv, 0.5 + r.xy * 0.45).rgb);
+        envC = max(envC - uBlack, 0.0) / (1.0 - uBlack) * uExposure;
+        float kspec = pow(max(dot(r, uKeyDir), 0.0), sharp) * mix(1.4, 0.35, uDof) * clamp(uKeyStrength * 0.45, 0.4, 1.6);
+        vec3 roomLight = envC * (0.06 + 0.5 * fres) + uKeyColor * kspec;
+
+        vec3 col = body;
+        col += rimCol * fres * mix(0.8, 0.45, room);
+        col += mix(studio, roomLight, room);
+        col += uHover * (fres * 0.9 + 0.07) * mix(vec3(1.0), tint, 0.5) * mix(1.0, 0.6, room);
+
+        col = mix(col, sceneBg(suv) * mix(0.7, 0.95, room) + tint * 0.03, uHaze * mix(1.0, 0.5, room));
+
+        // match the webcam's sensor noise
+        float grain = fract(sin(dot(gl_FragCoord.xy + fract(uTime * 7.13) * 91.7, vec2(12.9898, 78.233))) * 43758.5453) - 0.5;
+        col += grain * uGrain * (0.4 + ambLum);
+
         float alpha = 1.0 - uDof * smoothstep(0.5, 1.0, rim);  // soft, defocused silhouette
+
+        // real hands in front of the glass hide it
+        vec4 hm = texture2D(uHandMask, suv);
+        if (hm.a > 0.01) {
+          float handZ = mix(uMaskZ.x, uMaskZ.y, hm.g);
+          alpha *= 1.0 - hm.a * smoothstep(-0.15, 0.35, handZ - vWorldZ);
+        }
 
         gl_FragColor = vec4(col, alpha);
         #include <colorspace_fragment>

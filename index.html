@@ -32,15 +32,14 @@
   </section>
 
   <div id="status" class="glass pill hidden"></div>
-  <div id="hint" class="glass pill hidden">Open hand to push &nbsp;·&nbsp; pinch or fist to grab &nbsp;·&nbsp; both hands to stretch &nbsp;·&nbsp; let go mid-swing to throw</div>
-
   <aside id="depthPanel" class="glass panel hidden">
-    <div class="panel-title">Depth sensing <span>D to hide</span></div>
+    <div class="panel-title">Camera &amp; depth <span>D to hide</span></div>
     <div class="seg">
       <button data-method="mirror" title="Hand distance relative to your face (lens-independent)">Mirror</button>
       <button data-method="metric" title="3D hand pose in meters, mapped to your learned reach">Metric</button>
       <button data-method="palm" title="Apparent palm size only">Palm</button>
     </div>
+    <label class="fov">Exposure <input id="ev" type="range" min="-1.5" max="1" step="0.1" value="0" /> <span id="evVal">0.0 EV</span></label>
     <label class="fov">Camera FOV <input id="fov" type="range" min="45" max="100" value="62" /> <span id="fovVal">62°</span></label>
     <pre id="depthStats"></pre>
   </aside>

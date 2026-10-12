@@ -17,7 +17,7 @@ Best on a desktop or laptop with a webcam, in Chrome, Safari, Arc or Edge. Every
 | **Release mid-swing** | Throw. Soft throws bounce off the edges of the room; hard throws fly out, and the stone comes back. |
 | **Move hand toward / away from camera** | Changes depth. The depth of field follows your hand, so the stones you can reach are the sharp ones. |
 
-Toolbar: **Pile** (gravity, stones rest in a glass tray) · **Float** (zero-g) · **Reset**. Keys: `R` reset, `G` toggle gravity, `D` depth panel.
+Toolbar (top, so the lower half stays clear for your hands): **Pile** (gravity, stones rest in a glass tray) · **Float** (zero-g) · **Reset**. Keys: `R` reset, `G` toggle gravity, `D` depth panel.
 
 **Mouse fallback:** drag to grab and throw, scroll while holding to change depth, shift + scroll to resize.
 
@@ -32,6 +32,7 @@ Toolbar: **Pile** (gravity, stones rest in a glass tray) · **Float** (zero-g) �
   - **Palm:** apparent palm size only, the original heuristic, kept for comparison.
 
   Every joint gets its own metric depth, so a finger pointing at the screen reaches deeper than the palm behind it.
+- **Matching the real room:** the camera feed stays ungraded (decoded to linear light, with automatic black-level and exposure correction for bright rooms that make webcams run hot and hazy). A 64×36 probe of each frame finds the room's average color and its brightest light; the glass takes its highlight direction and color from that light and its reflections from a blurred copy of the room. Stones render at about the camera's resolution with matching grain, so they're no sharper than the video around them. Real hands occlude the glass via a soft depth mask drawn from the hand skeleton, and stones cast shadows onto the hand beneath them.
 - **Physics:** a small custom solver: sphere–sphere impulses with resting-contact handling, a bowl-shaped tray with rolling friction, kinematic hand colliders with swept tests so fast swipes don't tunnel, and throw velocity taken from the peak of recent tracked hand motion, so a throw still lands even if the camera loses your hand to motion blur.
 
 ## Run locally
@@ -47,7 +48,7 @@ python3 -m http.server 4317
 
 Constants at the top of [`src/main.js`](src/main.js):
 
-- Press `D` (or open the page with `#debug`) for the depth panel: method switch, camera FOV, live face/hand distances and each method's estimate.
+- Press `D` (or open the page with `#debug`) for the camera & depth panel: exposure bias, depth method, camera FOV, live face/hand distances and each method's estimate.
 - `MIRROR_NEAR` / `MIRROR_FAR`: hand-to-face distance ratio at the front and back of the room.
 - `HAND_NEAR` / `HAND_FAR`: palm method only.
 - `PINCH_ON` / `PINCH_OFF`, `FIST_ON` / `FIST_OFF`: gesture thresholds (with hysteresis).
@@ -62,5 +63,6 @@ style.css      visionOS-style glass panels
 src/main.js    scene, physics, gestures, interaction
 src/glass.js   stone palette, geometry, glass shader
 src/floor.js   tray, contact shadows, caustics
+src/room.js    room light probe, hand occlusion mask
 src/hands.js   MediaPipe setup, gestures, hand pose + face distance solvers
 ```

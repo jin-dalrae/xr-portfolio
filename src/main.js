@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { STONES, makeSmallStones, makeBackground, makeGlassMaterial, makeStoneGeometry, makeGlowTexture } from './glass.js';
 import { makeFloor, makeShadow, floorHeight, floorNormal } from './floor.js';
+import { createRoomProbe, createHandMask } from './room.js';
 import {
   createHandLandmarker, createFaceLandmarker, pinchRatio, palmSize, fingerCurl,
   solveHandPosition, faceDistance, focalPx, HAND_EDGES, WRIST, THUMB_TIP, INDEX_TIP,
@@ -54,7 +55,6 @@ const ctx = overlay.getContext('2d');
 const video = document.getElementById('video');
 const intro = document.getElementById('intro');
 const statusEl = document.getElementById('status');
-const hintEl = document.getElementById('hint');
 const toolbar = document.getElementById('toolbar');
 const DEBUG = location.hash.includes('debug');
 
@@ -80,7 +80,23 @@ const shared = {
   uResolution: { value: new THREE.Vector2(1, 1) },
   uTime: { value: 0 },
   uAspect: { value: 1 },
+  // real-room matching (camera mode)
+  uHandMask: { value: null },
+  uMaskZ: { value: new THREE.Vector2(Z_MIN, Z_MAX) },
+  uShadows: { value: Array.from({ length: 8 }, () => new THREE.Vector4()) },
+  uAmbient: { value: new THREE.Color(0.4, 0.4, 0.4) },
+  uKeyColor: { value: new THREE.Color(1, 1, 1) },
+  uKeyDir: { value: new THREE.Vector3(0.4, 0.6, 0.7).normalize() },
+  uKeyStrength: { value: 2 },
+  uEnv: { value: null },
+  uGrain: { value: 0 },
+  uExposure: { value: 1 },
+  uBlack: { value: 0 },
 };
+const room = createRoomProbe(video);
+const handMask = createHandMask();
+shared.uHandMask.value = handMask.tex;
+shared.uEnv.value = room.envTex;
 scene.add(makeBackground(shared));
 const floor = makeFloor();
 scene.add(floor);
@@ -88,7 +104,9 @@ scene.add(floor);
 let W = 1, H = 1;
 function resize() {
   W = window.innerWidth; H = window.innerHeight;
+  renderer.setPixelRatio(renderPixelRatio());
   renderer.setSize(W, H, false);
+  handMask.resize(W, H);
   camera.aspect = W / H;
   camera.updateProjectionMatrix();
   renderer.getDrawingBufferSize(shared.uResolution.value);
@@ -97,6 +115,15 @@ function resize() {
   overlay.width = W * dpr; overlay.height = H * dpr;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   updateVideoScale();
+}
+
+// With the camera on, render the glass at roughly the camera's own resolution:
+// webcam video is soft, and razor-sharp CG on top of it reads as a sticker.
+function renderPixelRatio() {
+  const dpr = Math.min(window.devicePixelRatio, 2);
+  if (!shared.uHasVideo.value || !video.videoWidth) return dpr;
+  const visibleVideoPx = video.videoWidth * shared.uVideoScale.value.x;
+  return clamp((visibleVideoPx / window.innerWidth) * 1.3, 1, dpr);
 }
 
 // "cover" fit: fraction of the video visible on each axis
@@ -299,7 +326,6 @@ function grab(p, b, mode) {
   b.grabPop = 1;
   b.state = 'free';
   b.spawnT = Math.max(b.spawnT, 0.99);
-  hideHintSoon();
 }
 
 // Peak hand velocity over short windows of the most recent *tracked* samples.
@@ -571,6 +597,7 @@ function processHands(result, now) {
     px /= 4; py /= 4; pz /= 4;
     p.palmX += (px - p.palmX) * a; p.palmY += (py - p.palmY) * a; p.palmZ = pz;
     placeCollider(p.colliders[p.colliders.length - 1], px, py, pz, dtS, continuous);
+    p.jointZ = lm.map((_, id) => lmZ(id));
 
     p.fresh = true;
   });
@@ -637,7 +664,6 @@ function handTouches() {
           b.angVel.add(axis.crossVectors(n, tang).multiplyScalar(-0.6 * SPIN));
           b.grabPop = Math.max(b.grabPop, clamp(-vn / 20, 0.05, 0.4));
           jellyKick(b, n, -vn);
-          hideHintSoon();
         }
       }
       c.fresh = false;
@@ -810,7 +836,8 @@ let focusZ = 0;
 
 function updateVisuals(dt) {
   pileFade += ((gravityOn ? 1 : 0) - pileFade) * (1 - Math.exp(-dt * 3));
-  floor.material.uniforms.uOpacity.value = pileFade;
+  const real = shared.uHasVideo.value;      // camera on: no fake grid over the real room
+  floor.material.uniforms.uOpacity.value = pileFade * (1 - real);
   floor.visible = pileFade > 0.01;
 
   // camera focus follows what you're interacting with
@@ -864,10 +891,10 @@ function updateVisuals(dt) {
       const k = clamp(1 - height / 5, 0, 1) * pileFade * back;
       b.shadow.position.set(b.pos.x, fy + 0.01, b.pos.z);
       b.shadow.scale.setScalar(b.r * 2.6 * (1 + height * 0.25));
-      b.shadow.material.opacity = 0.55 * k;
+      b.shadow.material.opacity = 0.55 * k * (real ? 0.6 : 1);
       b.caustic.position.set(b.pos.x + 0.12 * b.r, fy + 0.02, b.pos.z + 0.25 * b.r);
       b.caustic.scale.setScalar(b.r * 1.3 * (1 + height * 0.15));
-      b.caustic.material.opacity = 0.55 * k * (0.4 + b.stone.tintAmt);
+      b.caustic.material.opacity = 0.55 * k * (0.4 + b.stone.tintAmt) * (real ? 0.5 : 1);
     }
   }
 
@@ -879,10 +906,71 @@ function updateVisuals(dt) {
       o.position.copy(p.colliders[k].pos);
       const isPinchFinger = TIP_IDS[k] === THUMB_TIP || TIP_IDS[k] === INDEX_TIP;
       const boost = isPinchFinger ? 1 + 0.5 * p.pinchAmt : 1 - 0.5 * p.pinchAmt;
-      o.scale.setScalar(o.userData.base * boost);
-      o.material.opacity = isPinchFinger ? 0.95 : 0.55;
+      o.scale.setScalar(o.userData.base * boost * (real ? 0.7 : 1));
+      o.material.opacity = (isPinchFinger ? 0.95 : 0.55) * (real ? 0.6 : 1);
     });
   }
+
+  if (real) updateRoomMatch();
+}
+
+// ---------- matching the real room ----------
+const EXPOSURE_TARGET = 0.18;  // average linear luminance the room is eased toward (mid-grey)
+let exposureBias = 0;          // EV, from the depth panel
+let probeFrame = 0;
+const shadowCands = [];
+
+function updateRoomMatch() {
+  if (++probeFrame % 6 === 0) room.update();
+  // auto exposure: ease the room toward a natural mid-tone (webcams tend to run hot),
+  // keeping some of the scene's own mood; the panel's EV slider biases it
+  // dehaze first: most of a webcam's lifted blacks are removed (not all, to stay natural)
+  const black = Math.min(room.black * 0.85, 0.12);
+  shared.uBlack.value += (black - shared.uBlack.value) * 0.05;
+  const b = shared.uBlack.value;
+  const avgRaw = 0.2126 * room.ambient.r + 0.7152 * room.ambient.g + 0.0722 * room.ambient.b;
+  const avgLum = Math.max(avgRaw - b, 0) / (1 - b);
+  const auto = clamp(Math.pow(EXPOSURE_TARGET / Math.max(avgLum, 1e-3), 0.5), 0.6, 1.2);
+  const want = auto * Math.pow(2, exposureBias);
+  shared.uExposure.value += (want - shared.uExposure.value) * 0.05;
+  const amb = shared.uAmbient.value.copy(room.ambient);
+  amb.setRGB(Math.max(amb.r - b, 0) / (1 - b), Math.max(amb.g - b, 0) / (1 - b), Math.max(amb.b - b, 0) / (1 - b)).multiplyScalar(shared.uExposure.value);
+  shared.uKeyColor.value.copy(room.keyColor);
+  shared.uKeyStrength.value = room.keyStrength;
+  // brightest light's place in the frame -> direction the highlight reflects
+  shared.uKeyDir.value.set((room.keyUV.x - 0.5) * 2 * camera.aspect, (room.keyUV.y - 0.5) * 2, 1.1).normalize();
+  shared.uGrain.value = 0.02;
+
+  const hands = handPtrs.filter((p) => p.visible && p.landmarks && p.jointZ);
+  handMask.draw(hands.map((p) => ({
+    pts: p.landmarks.map(lmToScreen),
+    near: p.jointZ.map((z) => (z - Z_MIN) / (Z_MAX - Z_MIN)),
+  })));
+
+  // stones held or hovering over a hand cast a soft shadow onto it, away from the light
+  shadowCands.length = 0;
+  if (hands.length) {
+    for (const b of beads) {
+      if (b.state === 'gone') continue;
+      const k = isHeld(b) ? 0.9 : b.near * 0.7;
+      if (k < 0.05) continue;
+      const gap = Math.min(...hands.map((p) => Math.abs(b.pos.z - p.handZ)));
+      shadowCands.push({ b, k: k / (1 + gap * 0.8), gap });
+    }
+    shadowCands.sort((x, y) => y.k - x.k);
+  }
+  const keyU = room.keyUV.x, keyV = room.keyUV.y;
+  shared.uShadows.value.forEach((v, i) => {
+    const c = shadowCands[i];
+    if (!c) { v.set(0, 0, 0, 0); return; }
+    const [sx, sy] = worldToScreen(c.b.pos);
+    const u = sx / W, vv = 1 - sy / H;
+    const rUV = screenRadius(c.b) / H;
+    let dx = (u - keyU) * camera.aspect, dy = vv - keyV;
+    const len = Math.hypot(dx, dy) || 1;
+    const off = rUV * (0.3 + c.gap * 0.2);
+    v.set(u + (dx / len) * off / camera.aspect, vv + (dy / len) * off, rUV * (1 + c.gap * 0.25), c.k);
+  });
 }
 
 // ---------- overlay: visionOS-like hand cursors ----------
@@ -893,11 +981,13 @@ function drawOverlay() {
     const pts = p.landmarks.map(lmToScreen);
     const persp = perspective(p.handZ);
 
-    ctx.lineWidth = 1.5;
-    ctx.strokeStyle = 'rgba(255,255,255,0.12)';
-    ctx.beginPath();
-    for (const [a, b] of HAND_EDGES) { ctx.moveTo(...pts[a]); ctx.lineTo(...pts[b]); }
-    ctx.stroke();
+    if (panelOpen) {
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+      ctx.beginPath();
+      for (const [a, b] of HAND_EDGES) { ctx.moveTo(...pts[a]); ctx.lineTo(...pts[b]); }
+      ctx.stroke();
+    }
 
     const fistMode = p.held ? p.gripMode === 'fist' : p.fist;
     const amt = p.held ? 1 : fistMode ? 1 : p.pinchAmt;
@@ -905,13 +995,15 @@ function drawOverlay() {
     ctx.shadowColor = 'rgba(255,255,255,0.9)';
     ctx.shadowBlur = 12;
 
-    if (!fistMode) {
+    if (!fistMode && panelOpen) {
       ctx.strokeStyle = `rgba(255,255,255,${0.45 * (1 - amt)})`;
       ctx.lineWidth = 1.5;
       ctx.beginPath(); ctx.moveTo(...p.thumb); ctx.lineTo(...p.index); ctx.stroke();
     }
 
-    // focus ring at the grab point; its size follows the hand's depth
+    // focus ring at the grab point, only when it means something; its size follows depth
+    const engaged = p.hover || p.held || p.pinchAmt > 0.35 || p.fist;
+    if (!engaged && !panelOpen) { ctx.restore(); continue; }
     const base = fistMode ? 34 : 22 - 11 * amt;
     const r = base * clamp(persp, 0.55, 1.6);
     ctx.strokeStyle = p.hover || p.held ? 'rgba(255,255,255,0.95)' : 'rgba(255,255,255,0.5)';
@@ -952,6 +1044,12 @@ fovInput.addEventListener('input', () => {
   depth.lo = 0.22; depth.hi = 0.55; // reach in meters changes with the lens; relearn it
 });
 
+const evInput = document.getElementById('ev');
+evInput.addEventListener('input', () => {
+  exposureBias = +evInput.value;
+  document.getElementById('evVal').textContent = `${exposureBias > 0 ? '+' : ''}${exposureBias.toFixed(1)} EV`;
+});
+
 let statsTimer = 0;
 function updateStats(now) {
   if (!panelOpen || now - statsTimer < 100) return;
@@ -968,20 +1066,15 @@ function updateStats(now) {
     lines.push(`  z  mirror ${f(z.mirror)}  metric ${f(z.metric)}  palm ${f(z.palm)}`);
     lines.push(`  using ${p.method}${p.poseErr != null ? `  ·  fit ±${p.poseErr.toFixed(1)}px` : ''}`);
   });
+  if (shared.uHasVideo.value) lines.push(`exposure ×${shared.uExposure.value.toFixed(2)}  black −${shared.uBlack.value.toFixed(3)}  (auto)`);
   lines.push(`room z   front ${(Z_MAX - 0.3).toFixed(1)}  →  back ${(Z_MIN + 0.5).toFixed(1)}`);
   statsEl.textContent = lines.join('\n');
 }
 
 // ---------- intro / camera / toolbar ----------
-let hintTimer = null;
-function hideHintSoon() {
-  if (hintTimer) return;
-  hintTimer = setTimeout(() => hintEl.classList.add('hidden'), 8000);
-}
 
 function enter() {
   intro.classList.add('leaving');
-  hintEl.classList.remove('hidden');
   toolbar.classList.remove('hidden');
 }
 
@@ -1006,12 +1099,23 @@ document.getElementById('start').addEventListener('click', async () => {
       audio: false,
     });
     video.srcObject = stream;
+    // ask the webcam itself to expose a little darker, where it allows it
+    // (the shader's auto exposure covers cameras that don't)
+    try {
+      const track = stream.getVideoTracks()[0];
+      const caps = track.getCapabilities?.() || {};
+      if (caps.exposureCompensation) {
+        const { min, max } = caps.exposureCompensation;
+        await track.applyConstraints({ advanced: [{ exposureCompensation: Math.max(min, Math.min(max, -0.7)) }] });
+      }
+    } catch (e) { console.warn('exposure control unavailable', e); }
     await video.play();
     updateVideoScale();
     const tex = new THREE.VideoTexture(video);
-    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.colorSpace = THREE.NoColorSpace; // raw sRGB bytes; the shader decodes them
     shared.uVideo.value = tex;
     shared.uHasVideo.value = 1;
+    resize(); // render resolution now follows the camera
   } catch (e) {
     console.error(e);
     setStatus('Camera unavailable — mouse mode');
